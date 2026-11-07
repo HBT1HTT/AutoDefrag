@@ -1,0 +1,15 @@
+# 运行时数据与日志（含机器相关信息，不入库）
+Data/
+Logs/
+*.log
+*.pid
+
+# 本地测试/临时目录
+Tests/
+tmp/
+*.tmp
+
+# 打包产物
+dist/
+*.zip
+*.exe
