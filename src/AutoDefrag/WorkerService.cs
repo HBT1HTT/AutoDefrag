@@ -54,21 +54,23 @@ public sealed class WorkerService
         {
             error = ex.NativeErrorCode == 1223
                 ? "已取消管理员授权，本次未执行"
-                : "启动后台引擎失败：" + ex.Message;
-            Logger.Warn("启动 worker 失败: " + ex.Message);
+                : "无法开始整理：" + ex.Message;
+            Logger.Warn("启动整理任务失败: " + ex.Message);
             return false;
         }
 
         if (_process is null)
         {
-            error = "启动后台引擎失败";
+            error = "无法开始整理";
             return false;
         }
 
         _pid = _process.Id;
         Mode = mode;
         IsAuto = auto;
-        Logger.Info($"已拉起后台引擎 (PID={_pid}, Mode={mode}, Auto={auto}, 目标={(drives is { Length: > 0 } ? string.Join(",", drives) : "(自动)")}, 阈值={threshold}%)");
+        var modeName = mode == "clean" ? "整理磁盘" : "检查磁盘";
+        var thresholdText = mode == "clean" ? $", CPU上限={threshold}%" : string.Empty;
+        Logger.Info($"已开始后台任务 (PID={_pid}, 模式={modeName}, 自动={auto}, 目标={(drives is { Length: > 0 } ? string.Join(",", drives) : "(自动)")}{thresholdText})");
         return true;
     }
 

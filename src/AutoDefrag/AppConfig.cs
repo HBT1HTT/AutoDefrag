@@ -14,7 +14,7 @@ public sealed class AppConfig
     /// <summary>CPU 守护阈值(%)：高于该值时挂起 defrag。</summary>
     public int CpuThreshold { get; set; } = 70;
 
-    /// <summary>每日执行时间 HH:mm；"0" / "00:00" 表示"程序启动后立即执行一次"。</summary>
+    /// <summary>每日执行时间 HH:mm；"0" / "00:00" 表示"当天首次启动时执行一次"。</summary>
     public string DailyTime { get; set; } = "03:00";
 
     /// <summary>开机自启（写入 HKCU Run 键）。</summary>

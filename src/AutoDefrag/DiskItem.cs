@@ -10,23 +10,37 @@ public sealed class DiskItem : INotifyPropertyChanged
     private readonly Action<DiskItem> _onSelectionChanged;
 
     public DiskItem(
-        string letter, string volumeLabel, string typeText, string freeText, string fragText,
-        bool isSelected, Action<DiskItem> onSelectionChanged)
+        string letter, string volumeLabel, string typeText, string detailText,
+        string availableText, string totalText, bool isSelected, string? toolTip,
+        Action<DiskItem> onSelectionChanged)
     {
         Letter = letter;
         VolumeLabel = volumeLabel;
         TypeText = typeText;
-        FreeText = freeText;
-        FragText = fragText;
+        DetailText = detailText;
+        AvailableText = availableText;
+        TotalText = totalText;
+        ToolTip = toolTip;
         _isSelected = isSelected;
         _onSelectionChanged = onSelectionChanged;
     }
 
     public string Letter { get; }
     public string VolumeLabel { get; }
+
+    /// <summary>通俗的磁盘类型，例如“机械硬盘”。</summary>
     public string TypeText { get; }
-    public string FreeText { get; }
-    public string FragText { get; }
+
+    /// <summary>第二行补充信息，例如“NTFS · 每块 4KB”。</summary>
+    public string DetailText { get; }
+
+    /// <summary>可用空间，例如“可用 1.2 TB”。</summary>
+    public string AvailableText { get; }
+
+    /// <summary>总容量，例如“共 1.8 TB”。</summary>
+    public string TotalText { get; }
+
+    public string? ToolTip { get; }
 
     public bool IsSelected
     {

@@ -2,6 +2,7 @@
 bin/
 obj/
 publish/
+dist/
 
 # 运行期数据与日志
 Data/

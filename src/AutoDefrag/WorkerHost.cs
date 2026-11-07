@@ -37,13 +37,16 @@ public static class WorkerHost
                 threshold = Math.Clamp(parsed, 10, 100);
             }
 
-            Logger.Info($"worker 启动: mode={mode}, drives={(drives.Length == 0 ? "(自动)" : string.Join(",", drives))}, threshold={threshold}%");
+            var isClean = string.Equals(mode, "clean", StringComparison.OrdinalIgnoreCase);
+            var modeName = isClean ? "整理磁盘" : "检查磁盘";
+            var thresholdLog = isClean ? $", CPU上限={threshold}%" : ", CPU上限=(检查磁盘时不需要)";
+            Logger.Info($"后台任务启动: 模式={modeName}({mode}), 磁盘={(drives.Length == 0 ? "(自动)" : string.Join(",", drives))}{thresholdLog}");
 
-            var code = string.Equals(mode, "clean", StringComparison.OrdinalIgnoreCase)
+            var code = isClean
                 ? DefragEngine.RunClean(drives, threshold)
                 : DefragEngine.RunStatus(drives);
 
-            Logger.Info($"worker 结束: exit={code}");
+            Logger.Info($"后台任务结束: exit={code}");
             return code;
         }
         catch (Exception ex)

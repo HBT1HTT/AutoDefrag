@@ -2,6 +2,9 @@ using System.IO;
 
 namespace AutoDefrag;
 
+/// <summary>磁盘介质类型；Unknown 表示无法识别，调用方按 SSD 保守处理。</summary>
+public enum DiskMediaKind { Hdd, Ssd, Unknown }
+
 public static class DiskService
 {
     /// <summary>只枚举本地固定磁盘（不含 U 盘 / 光驱 / 网络盘）。</summary>
@@ -59,18 +62,56 @@ public static class DiskService
         }
     }
 
-    public static string TypeText(DriveInfo drive) => "本地固定 · " + FileSystem(drive);
+    /// <summary>磁盘类型（通俗说法），例如“机械硬盘”“固态硬盘”。</summary>
+    public static string MediaText(DriveInfo drive) => MediaText(GetMediaKind(drive));
 
-    public static string SizeText(DriveInfo drive)
+    /// <summary>文件系统与存储块大小，作为第二行补充信息。</summary>
+    public static string DetailText(DriveInfo drive, int clusterBytes)
     {
-        try
+        var fs = FileSystem(drive);
+        return clusterBytes > 0 ? $"{fs} · 每块 {ClusterText(clusterBytes)}" : fs;
+    }
+
+    /// <summary>存储块大小文本，例如 "4KB" / "64KB"。</summary>
+    public static string ClusterText(int clusterBytes)
+    {
+        if (clusterBytes <= 0) return "--";
+        if (clusterBytes >= 1024 * 1024) return $"{clusterBytes / (1024.0 * 1024):0.#}MB";
+        if (clusterBytes >= 1024) return $"{clusterBytes / 1024.0:0.#}KB";
+        return $"{clusterBytes}B";
+    }
+
+    /// <summary>Windows 内置 defrag 疑似不支持的超大簇（&gt;4KB）卷。</summary>
+    public static bool IsLargeCluster(int clusterBytes) => clusterBytes > 4096;
+
+    /// <summary>识别介质：寻道惩罚为 true=HDD，false=SSD，查询失败=Unknown。</summary>
+    public static DiskMediaKind GetMediaKind(DriveInfo drive) =>
+        Native.TryGetIncursSeekPenalty(Letter(drive)) switch
         {
-            return $"{FormatBytes(drive.AvailableFreeSpace)} 可用 / {FormatBytes(drive.TotalSize)}";
-        }
-        catch
-        {
-            return "--";
-        }
+            true => DiskMediaKind.Hdd,
+            false => DiskMediaKind.Ssd,
+            null => DiskMediaKind.Unknown
+        };
+
+    public static string MediaText(DiskMediaKind kind) => kind switch
+    {
+        DiskMediaKind.Hdd => "机械硬盘",
+        DiskMediaKind.Ssd => "固态硬盘",
+        _ => "类型未知"
+    };
+
+    /// <summary>可用空间，例如 "可用 1.2 TB"。</summary>
+    public static string AvailableText(DriveInfo drive)
+    {
+        try { return $"可用 {FormatBytes(drive.AvailableFreeSpace)}"; }
+        catch { return "可用 --"; }
+    }
+
+    /// <summary>总容量，例如 "共 1.8 TB"。</summary>
+    public static string TotalText(DriveInfo drive)
+    {
+        try { return $"共 {FormatBytes(drive.TotalSize)}"; }
+        catch { return "共 --"; }
     }
 
     public static string FormatBytes(long bytes)

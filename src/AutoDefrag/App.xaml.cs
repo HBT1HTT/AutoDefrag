@@ -18,6 +18,7 @@ public partial class App : System.Windows.Application
     private WinForms.ContextMenuStrip? _trayMenu;
     private Drawing.Icon? _trayIcon;
     private MainWindow? _window;
+    private SettingsWindow? _settingsWindow;
     private MainViewModel? _vm;
     private bool _exiting;
     private bool _trayHintShown;
@@ -178,16 +179,19 @@ public partial class App : System.Windows.Application
         {
             Icon = _trayIcon,
             Visible = true,
-            Text = "AutoDefrag · 磁盘维护"
+            Text = "AutoDefrag · 磁盘整理"
         };
 
         var openItem = new WinForms.ToolStripMenuItem("打开主界面");
         openItem.Click += (_, _) => Ui(ShowMainWindow);
 
-        var runItem = new WinForms.ToolStripMenuItem("立即优化");
+        var settingsItem = new WinForms.ToolStripMenuItem("设置…");
+        settingsItem.Click += (_, _) => Ui(ShowSettings);
+
+        var runItem = new WinForms.ToolStripMenuItem("立即整理");
         runItem.Click += (_, _) => Ui(() => _vm?.StartCleanManual());
 
-        var scheduleItem = new WinForms.ToolStripMenuItem("暂停每日调度");
+        var scheduleItem = new WinForms.ToolStripMenuItem("暂停自动整理");
         scheduleItem.Click += (_, _) => Ui(() => _vm?.ToggleSchedule());
 
         var logItem = new WinForms.ToolStripMenuItem("查看日志");
@@ -200,6 +204,7 @@ public partial class App : System.Windows.Application
         _trayMenu.Items.AddRange(new WinForms.ToolStripItem[]
         {
             openItem,
+            settingsItem,
             new WinForms.ToolStripSeparator(),
             runItem,
             scheduleItem,
@@ -210,8 +215,8 @@ public partial class App : System.Windows.Application
 
         _trayMenu.Opening += (_, _) =>
         {
-            scheduleItem.Text = _vm?.ScheduleEnabled == false ? "恢复每日调度" : "暂停每日调度";
-            runItem.Text = _vm?.IsBusy == true ? "正在优化…" : "立即优化";
+            scheduleItem.Text = _vm?.ScheduleEnabled == false ? "恢复自动整理" : "暂停自动整理";
+            runItem.Text = _vm?.IsBusy == true ? "正在整理…" : "立即整理";
             runItem.Enabled = _vm?.IsBusy != true;
         };
 
@@ -251,12 +256,27 @@ public partial class App : System.Windows.Application
         _window.Activate();
     }
 
+    public void ShowSettings()
+    {
+        if (_vm is null) return;
+        if (_settingsWindow is not null)
+        {
+            _settingsWindow.Activate();
+            return;
+        }
+
+        _settingsWindow = new SettingsWindow(_vm);
+        _settingsWindow.Closed += (_, _) => _settingsWindow = null;
+        _settingsWindow.Show();
+        _settingsWindow.Activate();
+    }
+
     public void ShowTrayHint()
     {
         if (_trayHintShown || _tray is null) return;
         _trayHintShown = true;
         _tray.ShowBalloonTip(3000, "AutoDefrag 仍在运行",
-            "程序已最小化到托盘，右键托盘图标可打开主界面或立即优化。", WinForms.ToolTipIcon.Info);
+            "程序已最小化到托盘，右键托盘图标可打开主界面或立即整理。", WinForms.ToolTipIcon.Info);
     }
 
     private void ShowNotification(string title, string text, NotifyLevel level)
@@ -304,6 +324,7 @@ public partial class App : System.Windows.Application
 
         try
         {
+            _settingsWindow?.Close();
             _window?.PrepareExit();
             _window?.Close();
         }

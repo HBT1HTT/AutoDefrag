@@ -34,6 +34,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _lastResultText = "暂无执行记录";
     private readonly IReadOnlyList<string> _fontNames;
     private string _selectedFont;
+    private string _largeClusterHint = string.Empty;
 
     public MainViewModel(AppConfig config, ConfigStore store)
     {
@@ -99,11 +100,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _scheduleTimer.Start();
 
         var decision = GetDailyDecision();
-        Logger.Info($"开机调度判定: {decision} (DailyTime={_config.DailyTime}, ScheduleEnabled={_config.ScheduleEnabled})");
+        Logger.Info($"开机自动整理判定: {decision} (DailyTime={_config.DailyTime}, ScheduleEnabled={_config.ScheduleEnabled})");
 
         if (decision == "done")
         {
-            NotificationRequested?.Invoke("AutoDefrag", "今日磁盘维护已完成，无需重复执行", NotifyLevel.Info);
+            NotificationRequested?.Invoke("AutoDefrag", "今天已经整理过了，不用重复整理", NotifyLevel.Info);
         }
         else if (decision == "run")
         {
@@ -122,7 +123,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (GetDailyDecision() != "run") return;
 
         _triggeredDate = Today;   // 先记下本会话今日已触发，避免 30s 反复重试
-        Logger.Info("每日调度触发清理: DailyTime=" + _config.DailyTime);
+        Logger.Info("每日自动整理已触发: DailyTime=" + _config.DailyTime);
         StartClean(auto: true);
     }
 
@@ -163,15 +164,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void RefreshDisks()
     {
-        var status = DriveStatusFile.TryLoad();
-        var frags = new Dictionary<string, double?>(StringComparer.OrdinalIgnoreCase);
-        if (status is not null)
-        {
-            foreach (var entry in status.Drives)
-                frags[entry.Drive] = entry.FragPercent;
-        }
-
         var firstRun = _config.SelectedDrives is null;
+        var largeClusterNotes = new List<string>();
 
         _suppressSave = true;
         Disks.Clear();
@@ -180,17 +174,24 @@ public sealed class MainViewModel : INotifyPropertyChanged
             var letter = DiskService.Letter(drive);
             var selected = _config.SelectedDrives is null ||
                            _config.SelectedDrives.Any(x => string.Equals(x, letter, StringComparison.OrdinalIgnoreCase));
-            var fragText = frags.TryGetValue(letter, out var frag) && frag is not null
-                ? $"{frag:0.##}%"
-                : "--";
+
+            var clusterBytes = Native.GetClusterSize(letter);
+            string? toolTip = null;
+            if (DiskService.IsLargeCluster(clusterBytes))
+            {
+                toolTip = $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），Windows 自带的整理工具可能整理不了，结果会显示成“可能不支持”，具体可以看日志。";
+                largeClusterNotes.Add($"{letter} 的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），Windows 自带整理工具可能整理不了");
+            }
 
             Disks.Add(new DiskItem(
                 letter,
                 DiskService.VolumeLabel(drive),
-                DiskService.TypeText(drive),
-                DiskService.SizeText(drive),
-                fragText,
+                DiskService.MediaText(drive),
+                DiskService.DetailText(drive, clusterBytes),
+                DiskService.AvailableText(drive),
+                DiskService.TotalText(drive),
                 selected,
+                toolTip,
                 OnDiskSelectionChanged));
         }
 
@@ -202,7 +203,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         _suppressSave = false;
 
+        _largeClusterHint = largeClusterNotes.Count > 0
+            ? string.Join("；", largeClusterNotes) + "。整理结果会如实显示成“可能不支持”，具体可以看日志。"
+            : string.Empty;
+
         OnPropertyChanged(nameof(HasDisks));
+        OnPropertyChanged(nameof(LargeClusterHint));
+        OnPropertyChanged(nameof(LargeClusterHintVisibility));
         OnPropertyChanged(nameof(EmptyHintVisibility));
         OnPropertyChanged(nameof(SelectedCount));
         OnPropertyChanged(nameof(CanStart));
@@ -212,6 +219,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public bool HasDisks => Disks.Count > 0;
     public Visibility EmptyHintVisibility => Disks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>超大簇（&gt;4KB）卷的简短提示，正常情况下隐藏。</summary>
+    public string LargeClusterHint => _largeClusterHint;
+
+    public Visibility LargeClusterHintVisibility =>
+        _largeClusterHint.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 
     public int SelectedCount => Disks.Count(d => d.IsSelected);
 
@@ -263,8 +276,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (_isBusy) return;
 
         _footerHint = SelectedCount > 0
-            ? $"已勾选 {SelectedCount} 个磁盘 · 优化时会请求管理员权限"
-            : "尚未勾选磁盘 · 勾选后即可立即优化";
+            ? $"已选 {SelectedCount} 块磁盘 · 机械硬盘会深度整理，固态硬盘只做优化 · 开始时会请求管理员权限"
+            : "还没有选磁盘 · 勾选后就可以开始整理";
         OnPropertyChanged(nameof(FooterHint));
     }
 
@@ -278,7 +291,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (_config.ScheduleEnabled == value) return;
             _config.ScheduleEnabled = value;
             _store.Save(_config);
-            Logger.Info(value ? "每日调度已启用" : "每日调度已暂停");
+            Logger.Info(value ? "每日自动整理已启用" : "每日自动整理已暂停");
             OnPropertyChanged();
             OnPropertyChanged(nameof(NextRunText));
         }
@@ -306,8 +319,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _isTimeInvalid = false;
             _store.Save(_config);
             Logger.Info(value
-                ? "调度改为：程序启动后立即执行一次"
-                : $"调度改为：每日 {_config.DailyTime}");
+                ? "自动整理改为：当天首次启动时执行一次"
+                : $"自动整理改为：每天 {_config.DailyTime}");
 
             OnPropertyChanged();
             OnPropertyChanged(nameof(TimeText));
@@ -414,8 +427,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         get
         {
-            if (!_config.ScheduleEnabled) return "调度已暂停";
-            if (_config.RunAtStartup) return "下次程序启动时";
+            if (!_config.ScheduleEnabled) return "自动整理已暂停";
+            if (_config.RunAtStartup) return "当天首次启动时";
             if (LastRunIsToday()) return $"明天 {_config.DailyTime}";
 
             return DateTime.Now < TargetTimeToday()
@@ -474,6 +487,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    public string StartButtonText => _isBusy ? "正在整理…" : "立即整理";
+
     public bool IsBusy
     {
         get => _isBusy;
@@ -483,6 +498,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _isBusy = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(CanStart));
+            OnPropertyChanged(nameof(StartButtonText));
         }
     }
 
@@ -507,22 +523,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
             StatusText = "未选择磁盘";
             FooterHint = "请先在磁盘列表中勾选至少一个磁盘";
             if (!auto)
-                NotificationRequested?.Invoke("AutoDefrag", "请先在主界面勾选要优化的磁盘", NotifyLevel.Warning);
+                NotificationRequested?.Invoke("AutoDefrag", "请先在主界面勾选要整理的磁盘", NotifyLevel.Warning);
             return;
         }
 
         if (!_worker.Start("clean", drives.ToArray(), _config.CpuThreshold, auto, out var error))
         {
             StatusText = "空闲";
-            FooterHint = error ?? "启动失败";
+            FooterHint = error ?? "无法开始整理";
             if (!auto)
-                NotificationRequested?.Invoke("AutoDefrag", error ?? "启动失败", NotifyLevel.Warning);
+                NotificationRequested?.Invoke("AutoDefrag", error ?? "无法开始整理", NotifyLevel.Warning);
             return;
         }
 
         IsBusy = true;
-        StatusText = auto ? "自动优化中" : "正在优化";
-        FooterHint = $"目标 {string.Join("、", drives)} · CPU 高于 {_config.CpuThreshold}% 时自动暂停";
+        StatusText = auto ? "自动整理中" : "正在整理";
+        FooterHint = $"正在整理 {string.Join("、", drives)} · CPU 占用超过 {_config.CpuThreshold}% 时会自动暂停";
     }
 
     public void StartProbe()
@@ -543,14 +559,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (!_worker.Start("status", drives, _config.CpuThreshold, false, out var error))
         {
             StatusText = "空闲";
-            FooterHint = error ?? "启动失败";
-            NotificationRequested?.Invoke("AutoDefrag", error ?? "探测失败", NotifyLevel.Warning);
+            FooterHint = error ?? "无法开始检查";
+            NotificationRequested?.Invoke("AutoDefrag", error ?? "检查失败", NotifyLevel.Warning);
             return;
         }
 
         IsBusy = true;
-        StatusText = "正在探测";
-        FooterHint = "正在获取各磁盘碎片率（需要管理员权限）";
+        StatusText = "正在检查磁盘";
+        FooterHint = "正在读取各磁盘的碎片情况（需要管理员权限）";
     }
 
     // ---------------------------------------------------------------- worker 看门狗
@@ -590,19 +606,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         if (string.Equals(state.Mode, "status", StringComparison.OrdinalIgnoreCase))
         {
-            StatusText = "正在探测";
-            FooterHint = $"正在探测 {state.Drive} · {state.DriveIndex}/{state.DriveTotal}";
+            StatusText = "正在检查磁盘";
+            FooterHint = $"正在检查 {state.Drive} · {state.DriveIndex}/{state.DriveTotal}";
             return;
         }
 
         if (state.Stage == "分析碎片")
         {
-            StatusText = _worker.IsAuto ? "自动优化中" : "正在优化";
-            FooterHint = $"{state.Drive} · 正在分析碎片率";
+            StatusText = _worker.IsAuto ? "自动整理中" : "正在整理";
+            FooterHint = $"{state.Drive} · 正在读取碎片情况";
             return;
         }
 
-        StatusText = _worker.IsAuto ? "自动优化中" : "正在优化";
+        var verb = state.Stage == "正在优化" ? "优化" : "整理";
+        StatusText = _worker.IsAuto ? $"自动{verb}中" : $"正在{verb}";
         var progress = state.DriveTotal > 1 ? $"{state.DriveIndex}/{state.DriveTotal} " : string.Empty;
         FooterHint = $"{progress}{state.Drive} · CPU {state.CpuPercent:0.#}% · 已暂停 {state.Suspended} 次";
     }
@@ -612,24 +629,24 @@ public sealed class MainViewModel : INotifyPropertyChanged
         IsBusy = false;
         var ok = exitCode == 0;
 
-        Logger.Info($"后台引擎已退出 (Mode={mode}, Auto={auto}, Exit={exitCode?.ToString() ?? "未知"})");
+        Logger.Info($"后台任务已结束 (模式={(string.Equals(mode, "clean", StringComparison.OrdinalIgnoreCase) ? "整理" : "检查")}, Auto={auto}, Exit={exitCode?.ToString() ?? "未知"})");
 
         if (string.Equals(mode, "clean", StringComparison.OrdinalIgnoreCase))
         {
             RefreshLastResult();
-            StatusText = ok ? "已完成" : "已完成·有失败";
-            FooterHint = ok ? "整理完成，结果已记录" : "整理结束，部分磁盘未完成，详见日志";
+            StatusText = ok ? "已完成" : "完成，部分未成功";
+            FooterHint = ok ? "整理完成，结果已记录" : "整理结束，有磁盘没能完成，点“查看日志”可以看原因";
 
             var message = ok
-                ? (auto ? "每日磁盘维护已完成" : "磁盘优化已完成")
-                : (auto ? "每日磁盘维护结束：有磁盘未完成" : "磁盘优化结束：有磁盘未完成");
+                ? (auto ? "今天的自动整理已完成" : "磁盘整理已完成")
+                : (auto ? "今天的自动整理结束，有磁盘没能完成" : "整理结束，有磁盘没能完成");
             NotificationRequested?.Invoke("AutoDefrag", message, ok ? NotifyLevel.Info : NotifyLevel.Warning);
         }
         else
         {
             RefreshDisks();
             StatusText = "空闲";
-            FooterHint = "碎片率已更新";
+            FooterHint = "磁盘信息已更新";
         }
 
         OnPropertyChanged(nameof(NextRunText));
