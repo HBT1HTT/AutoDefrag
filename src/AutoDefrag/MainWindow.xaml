@@ -1,0 +1,361 @@
+<Window x:Class="AutoDefrag.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="AutoDefrag"
+        Width="1020" Height="720" MinWidth="940" MinHeight="640"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource WindowBackground}"
+        Foreground="{DynamicResource TextPrimary}"
+        FontFamily="{DynamicResource AppFont}"
+        TextOptions.TextFormattingMode="Ideal"
+        TextOptions.TextRenderingMode="ClearType"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- ================= 顶部标题 ================= -->
+        <Grid Margin="28,22,28,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <Image Source="pack://application:,,,/Assets/icon-256.png"
+                   Width="32" Height="32" Stretch="Uniform"
+                   RenderOptions.BitmapScalingMode="HighQuality"
+                   VerticalAlignment="Center" />
+
+            <StackPanel Grid.Column="1" Margin="13,0,0,0" VerticalAlignment="Center">
+                <TextBlock Text="AutoDefrag" Style="{StaticResource WindowTitle}" />
+                <TextBlock Text="磁盘整理与自动化维护" Style="{StaticResource WindowSubtitle}" />
+            </StackPanel>
+
+            <Border Grid.Column="2" VerticalAlignment="Center"
+                    Background="{DynamicResource AccentSoft}"
+                    BorderBrush="{DynamicResource AccentBorder}"
+                    BorderThickness="1" CornerRadius="13" Padding="12,5">
+                <StackPanel Orientation="Horizontal">
+                    <Ellipse Width="7" Height="7" Fill="{DynamicResource Accent}"
+                             VerticalAlignment="Center" />
+                    <TextBlock Text="{Binding StatusText}" Margin="7,0,0,0"
+                               FontSize="12.5" VerticalAlignment="Center" />
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- ================= 主体 ================= -->
+        <Grid Grid.Row="1" Margin="28,0,28,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="1.6*" />
+                <ColumnDefinition Width="16" />
+                <ColumnDefinition Width="1*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- 磁盘列表 -->
+            <Border Grid.Column="0" Style="{StaticResource Card}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Grid>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="磁盘" Style="{StaticResource CardTitle}" />
+                            <TextBlock Text="{Binding SelectedCount, StringFormat='已勾选 {0} 个 · 仅显示本地固定磁盘'}"
+                                       Style="{StaticResource HintText}" />
+                        </StackPanel>
+
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
+                                    VerticalAlignment="Center">
+                            <Button Content="{Binding SelectAllText}" Style="{StaticResource LinkButton}"
+                                    Click="SelectAll_Click" />
+                            <Button Content="刷新" Style="{StaticResource LinkButton}"
+                                    Click="Refresh_Click" Margin="2,0,0,0" />
+                        </StackPanel>
+                    </Grid>
+
+                    <Grid Grid.Row="1" Margin="8,14,8,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="34" />
+                            <ColumnDefinition Width="62" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="118" />
+                            <ColumnDefinition Width="176" />
+                            <ColumnDefinition Width="64" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="盘符" Style="{StaticResource HintText}" />
+                        <TextBlock Grid.Column="1" Text="卷标" Style="{StaticResource HintText}" />
+                        <TextBlock Grid.Column="2" Text="类型" Style="{StaticResource HintText}" />
+                        <TextBlock Grid.Column="3" Text="可用空间" Style="{StaticResource HintText}" />
+                        <TextBlock Grid.Column="4" Text="碎片率" Style="{StaticResource HintText}"
+                                   HorizontalAlignment="Right" />
+                    </Grid>
+
+                    <Grid Grid.Row="2" Margin="0,4,0,0">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <ItemsControl ItemsSource="{Binding Disks}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Padding="9,8" CornerRadius="7">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Background" Value="Transparent" />
+                                                    <Style.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter Property="Background" Value="{DynamicResource RowHover}" />
+                                                        </Trigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="34" />
+                                                    <ColumnDefinition Width="62" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="118" />
+                                                    <ColumnDefinition Width="176" />
+                                                    <ColumnDefinition Width="64" />
+                                                </Grid.ColumnDefinitions>
+
+                                                <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                                          Style="{StaticResource FluentCheckBox}"
+                                                          VerticalAlignment="Center" />
+
+                                                <TextBlock Grid.Column="1" Text="{Binding Letter}"
+                                                           FontWeight="SemiBold" FontSize="14"
+                                                           VerticalAlignment="Center" />
+
+                                                <TextBlock Grid.Column="2" Text="{Binding VolumeLabel}"
+                                                           FontSize="13.5" VerticalAlignment="Center"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           ToolTip="{Binding VolumeLabel}" />
+
+                                                <TextBlock Grid.Column="3" Text="{Binding TypeText}"
+                                                           FontSize="12.5" VerticalAlignment="Center"
+                                                           Foreground="{DynamicResource TextSecondary}"
+                                                           TextTrimming="CharacterEllipsis" />
+
+                                                <TextBlock Grid.Column="4" Text="{Binding FreeText}"
+                                                           FontSize="12.5" VerticalAlignment="Center"
+                                                           Foreground="{DynamicResource TextSecondary}" />
+
+                                                <TextBlock Grid.Column="5" Text="{Binding FragText}"
+                                                           FontSize="12.5" VerticalAlignment="Center"
+                                                           HorizontalAlignment="Right"
+                                                           Foreground="{DynamicResource TextSecondary}" />
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+
+                        <TextBlock Text="未检测到本地固定磁盘"
+                                   Visibility="{Binding EmptyHintVisibility}"
+                                   FontSize="13" Foreground="{DynamicResource TextTertiary}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <!-- 右侧设置 -->
+            <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <StackPanel>
+
+                    <!-- 自动维护 -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Text="自动维护" Style="{StaticResource CardTitle}" />
+
+                            <Grid Margin="0,14,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="启用每日自动维护" Style="{StaticResource SectionLabel}" />
+                                <ToggleButton Grid.Column="1" Style="{StaticResource ToggleSwitch}"
+                                              IsChecked="{Binding ScheduleEnabled, Mode=TwoWay}" />
+                            </Grid>
+
+                            <Grid Margin="0,12,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="开机后立即执行一次" Style="{StaticResource SectionLabel}" />
+                                    <TextBlock Text="程序启动且当天尚未执行时立即运行"
+                                               Style="{StaticResource HintText}" />
+                                </StackPanel>
+                                <ToggleButton Grid.Column="1" Style="{StaticResource ToggleSwitch}"
+                                              VerticalAlignment="Center"
+                                              IsChecked="{Binding RunAtStartup, Mode=TwoWay}" />
+                            </Grid>
+
+                            <Grid Margin="0,14,0,0" Visibility="{Binding TimeRowVisibility}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="每日执行时间" Style="{StaticResource SectionLabel}" />
+                                    <TextBlock Text="24 小时制 HH:mm，修改后立即保存"
+                                               Style="{StaticResource HintText}" />
+                                </StackPanel>
+                                <TextBox x:Name="TimeBox" Grid.Column="1" Width="86"
+                                         Style="{StaticResource FluentTextBox}"
+                                         Text="{Binding TimeText, Mode=OneWay}"
+                                         VerticalAlignment="Center"
+                                         LostFocus="TimeBox_LostFocus"
+                                         KeyDown="TimeBox_KeyDown" />
+                            </Grid>
+
+                            <TextBlock Text="格式不正确，请填写 HH:mm"
+                                       Visibility="{Binding TimeErrorVisibility}"
+                                       Foreground="{DynamicResource Danger}"
+                                       FontSize="12" Margin="0,5,0,0" />
+
+                            <Grid Margin="0,14,0,0">
+                                <TextBlock Text="下次运行" Style="{StaticResource SectionLabel}" />
+                                <TextBlock Text="{Binding NextRunText}" HorizontalAlignment="Right"
+                                           FontSize="13.5" Foreground="{DynamicResource TextSecondary}" />
+                            </Grid>
+
+                            <TextBlock Text="上次运行结果" Style="{StaticResource SectionLabel}"
+                                       Margin="0,16,0,6" />
+                            <Border Background="{DynamicResource RowHover}"
+                                    BorderBrush="{DynamicResource Divider}"
+                                    BorderThickness="1" CornerRadius="6"
+                                    Padding="10,8" MinHeight="56">
+                                <TextBlock Text="{Binding LastResultText}"
+                                           TextWrapping="Wrap" FontSize="12.5" LineHeight="19"
+                                           Foreground="{DynamicResource TextSecondary}" />
+                            </Border>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- 选项 -->
+                    <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                        <StackPanel>
+                            <TextBlock Text="选项" Style="{StaticResource CardTitle}" />
+
+                            <TextBlock Text="外观" Style="{StaticResource SectionLabel}"
+                                       Margin="0,14,0,6" />
+                            <Border HorizontalAlignment="Left"
+                                    Background="{DynamicResource ControlBackground}"
+                                    BorderBrush="{DynamicResource ControlBorder}"
+                                    BorderThickness="1" CornerRadius="7" Padding="2">
+                                <StackPanel Orientation="Horizontal">
+                                    <RadioButton x:Name="ThemeSystem" Content="跟随系统" Tag="System"
+                                                 GroupName="Theme" Style="{StaticResource SegmentRadio}"
+                                                 Checked="Theme_Checked" />
+                                    <RadioButton x:Name="ThemeLight" Content="浅色" Tag="Light"
+                                                 GroupName="Theme" Style="{StaticResource SegmentRadio}"
+                                                 Checked="Theme_Checked" />
+                                    <RadioButton x:Name="ThemeDark" Content="深色" Tag="Dark"
+                                                 GroupName="Theme" Style="{StaticResource SegmentRadio}"
+                                                 Checked="Theme_Checked" />
+                                </StackPanel>
+                            </Border>
+
+                            <StackPanel Margin="0,16,0,0">
+                                <TextBlock Text="界面字体" Style="{StaticResource SectionLabel}" />
+                                <TextBlock Text="列表包含系统已安装字体，选中后立即生效并保存"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
+                                <ComboBox x:Name="FontBox" Margin="0,8,0,0"
+                                          HorizontalAlignment="Stretch"
+                                          Style="{StaticResource FluentComboBox}"
+                                          ItemContainerStyle="{StaticResource FluentComboBoxItem}"
+                                          ItemsSource="{Binding FontNames}"
+                                          SelectedItem="{Binding SelectedFont, Mode=TwoWay}"
+                                          ToolTip="{Binding SelectedFont}" />
+                            </StackPanel>
+
+                            <Grid Margin="0,14,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="开机自启" Style="{StaticResource SectionLabel}" />
+                                <ToggleButton Grid.Column="1" Style="{StaticResource ToggleSwitch}"
+                                              IsChecked="{Binding AutoStart, Mode=TwoWay}" />
+                            </Grid>
+
+                            <Grid Margin="0,12,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="关闭窗口时最小化到托盘" Style="{StaticResource SectionLabel}" />
+                                    <TextBlock Text="关闭则退出；快捷键和行为均由托盘菜单控制"
+                                               Style="{StaticResource HintText}" />
+                                </StackPanel>
+                                <ToggleButton Grid.Column="1" Style="{StaticResource ToggleSwitch}"
+                                              VerticalAlignment="Center"
+                                              IsChecked="{Binding MinimizeToTray, Mode=TwoWay}" />
+                            </Grid>
+
+                            <Grid Margin="0,16,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="CPU 守护阈值" Style="{StaticResource SectionLabel}" />
+                                    <TextBlock Text="CPU 高于阈值时暂停整理，回落后自动继续"
+                                               Style="{StaticResource HintText}" />
+                                </StackPanel>
+                                <TextBlock Grid.Column="1" Text="{Binding CpuThresholdText}"
+                                           FontSize="13.5" FontWeight="SemiBold"
+                                           VerticalAlignment="Center" />
+                            </Grid>
+
+                            <Slider Margin="0,8,0,0" Minimum="10" Maximum="100"
+                                    TickFrequency="5" IsSnapToTickEnabled="True"
+                                    Style="{StaticResource FluentSlider}"
+                                    Value="{Binding CpuThreshold, Mode=TwoWay, Delay=200}" />
+                        </StackPanel>
+                    </Border>
+
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+
+        <!-- ================= 底部操作栏 ================= -->
+        <Grid Grid.Row="2" Margin="28,16,28,22">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <TextBlock Text="{Binding FooterHint}"
+                       Foreground="{DynamicResource TextSecondary}"
+                       FontSize="12.5" VerticalAlignment="Center"
+                       Margin="0,0,16,0"
+                       TextTrimming="CharacterEllipsis" />
+
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <Button Content="查看日志" Style="{StaticResource SecondaryButton}"
+                        Click="OpenLog_Click" />
+                <Button Content="探测碎片率" Style="{StaticResource SecondaryButton}"
+                        Click="Probe_Click" Margin="8,0,0,0" />
+                <Button Content="立即优化" Style="{StaticResource PrimaryButton}"
+                        Click="Optimize_Click" Margin="8,0,0,0" MinWidth="104"
+                        IsEnabled="{Binding CanStart}" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

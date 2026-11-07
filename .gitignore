@@ -1,15 +1,16 @@
-# 运行时数据与日志（含机器相关信息，不入库）
+# 构建产物
+bin/
+obj/
+publish/
+
+# 运行期数据与日志
 Data/
 Logs/
-*.log
-*.pid
 
-# 本地测试/临时目录
-Tests/
-tmp/
-*.tmp
-
-# 打包产物
-dist/
-*.zip
-*.exe
+# IDE / 系统临时文件
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+.DS_Store
