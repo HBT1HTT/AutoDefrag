@@ -17,6 +17,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <!-- ================= 标题 ================= -->
@@ -45,7 +46,7 @@
 
         <!-- ================= 磁盘列表 ================= -->
         <Border Grid.Row="1" Style="{StaticResource Card}" Padding="12,10"
-                Margin="0,10,0,12">
+                Margin="0,10,0,8">
             <Grid Grid.IsSharedSizeScope="True">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
@@ -135,11 +136,94 @@
             </Grid>
         </Border>
 
+        <!-- ================= 进度区（默认收起） ================= -->
+        <StackPanel Grid.Row="2">
+            <!-- 收起：细进度条 + 百分比（空闲时不显示进度条，只显示“就绪”） -->
+            <Grid Visibility="{Binding ProgressCollapsedVisibility}" Margin="0,0,0,10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <Button Style="{StaticResource LinkButton}" Width="20" Height="22" Padding="0"
+                        ToolTip="{Binding ProgressToggleTip}" Click="ProgressToggle_Click">
+                    <TextBlock Text="{Binding ProgressGlyph}" FontSize="12"
+                               Foreground="{DynamicResource TextSecondary}" />
+                </Button>
+
+                <ProgressBar Grid.Column="1" Height="4" Margin="6,0,8,0"
+                             VerticalAlignment="Center"
+                             Minimum="0" Maximum="100"
+                             Value="{Binding ProgressPercentValue, Mode=OneWay}"
+                             IsIndeterminate="{Binding ProgressIndeterminate, Mode=OneWay}"
+                             Visibility="{Binding ProgressTrackVisibility}"
+                             Foreground="{DynamicResource Accent}"
+                             Background="{DynamicResource SliderTrack}"
+                             BorderThickness="0" />
+
+                <TextBlock Grid.Column="2" Text="{Binding ProgressPercentText}"
+                           FontSize="11.5" MinWidth="34" TextAlignment="Right"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextSecondary}" />
+            </Grid>
+
+            <!-- 展开：标题 + 当前阶段/文件/速度 + 类 cmd 滚动日志 -->
+            <Border Visibility="{Binding ProgressExpandedVisibility}"
+                    Style="{StaticResource Card}" Padding="12,10" Margin="0,0,0,10">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <Button Style="{StaticResource LinkButton}" Width="20" Height="22" Padding="0"
+                                ToolTip="{Binding ProgressToggleTip}" Click="ProgressToggle_Click">
+                            <TextBlock Text="{Binding ProgressGlyph}" FontSize="12"
+                                       Foreground="{DynamicResource TextSecondary}" />
+                        </Button>
+
+                        <TextBlock Grid.Column="1" Text="{Binding ProgressTitle}"
+                                   FontSize="13" FontWeight="SemiBold" Margin="6,0,8,0"
+                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                   Foreground="{DynamicResource TextPrimary}" />
+
+                        <TextBlock Grid.Column="2" Text="{Binding ProgressPercentText}"
+                                   FontSize="12" FontWeight="SemiBold" MinWidth="38"
+                                   TextAlignment="Right" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextPrimary}" />
+                    </Grid>
+
+                    <TextBlock Text="{Binding ProgressDetail}" Style="{StaticResource HintText}"
+                               TextWrapping="Wrap" Margin="26,4,0,8" />
+
+                    <Border Background="#0C0C0C" CornerRadius="6" Height="148">
+                        <TextBox x:Name="ProgressLogBox"
+                                 IsReadOnly="True" IsTabStop="False" Focusable="False"
+                                 FontFamily="Cascadia Mono, Consolas, Microsoft YaHei UI"
+                                 FontSize="11.5"
+                                 Background="Transparent" Foreground="#D6D6D6"
+                                 BorderThickness="0" Padding="8,6"
+                                 Text="{Binding ProgressLogText, Mode=OneWay}"
+                                 VerticalScrollBarVisibility="Auto"
+                                 HorizontalScrollBarVisibility="Auto"
+                                 TextWrapping="NoWrap"
+                                 TextChanged="ProgressLog_TextChanged" />
+                    </Border>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+
         <!-- ================= 底部操作 ================= -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal"
+        <StackPanel Grid.Row="3" Orientation="Horizontal"
                     HorizontalAlignment="Right">
             <Button Content="查看日志" Style="{StaticResource SecondaryButton}"
                     Click="OpenLog_Click" />
+            <Button Content="停止整理" Style="{StaticResource SecondaryButton}"
+                    Click="Stop_Click" Margin="8,0,0,0"
+                    Visibility="{Binding StopButtonVisibility}" />
             <Button Content="{Binding StartButtonText}" Style="{StaticResource PrimaryButton}"
                     Click="Optimize_Click" Margin="8,0,0,0" MinWidth="104"
                     IsEnabled="{Binding CanStart}" />

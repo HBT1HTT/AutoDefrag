@@ -38,12 +38,35 @@ public static class WorkerHost
             }
 
             var isClean = string.Equals(mode, "clean", StringComparison.OrdinalIgnoreCase);
+            var engineText = GetValue(args, "--engine") ?? "Auto";
+            var engine = engineText.Equals("System", StringComparison.OrdinalIgnoreCase) ? "System"
+                : engineText.Equals("Auto", StringComparison.OrdinalIgnoreCase) ? "Auto"
+                : "Self";
+
+            // 0 = 不按文件碎片率过滤（全部整理）；1–15 = 只整理达到该碎片率的文件
+            var minFrag = 0;
+            var minFragText = GetValue(args, "--minfrag");
+            if (minFragText is not null &&
+                int.TryParse(minFragText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedFrag))
+            {
+                minFrag = parsedFrag is >= 1 and <= 15 ? parsedFrag : 0;
+            }
+
             var modeName = isClean ? "整理磁盘" : "检查磁盘";
-            var thresholdLog = isClean ? $", CPU上限={threshold}%" : ", CPU上限=(检查磁盘时不需要)";
+            var thresholdLog = isClean
+                ? $", CPU上限={threshold}%, 整理方式={EngineResolver.ModeText(engine)}, 文件碎片率={(minFrag > 0 ? $"≥{minFrag}%" : "不限")}"
+                : ", CPU上限=(检查磁盘时不需要)";
             Logger.Info($"后台任务启动: 模式={modeName}({mode}), 磁盘={(drives.Length == 0 ? "(自动)" : string.Join(",", drives))}{thresholdLog}");
 
+            // 任务级互斥：另一个整理/预览任务（含其他实例发起的）正在运行时不再并发操作同一批卷
+            if (!TaskGate.TryEnter(out var gateError))
+            {
+                Logger.Warn($"后台任务未执行：{gateError}");
+                return 3;
+            }
+
             var code = isClean
-                ? DefragEngine.RunClean(drives, threshold)
+                ? DefragEngine.RunClean(drives, threshold, engine, 10, 10, minFrag)
                 : DefragEngine.RunStatus(drives);
 
             Logger.Info($"后台任务结束: exit={code}");
@@ -53,6 +76,10 @@ public static class WorkerHost
         {
             Logger.Error("worker 异常: ", ex);
             return 1;
+        }
+        finally
+        {
+            TaskGate.Leave();
         }
     }
 

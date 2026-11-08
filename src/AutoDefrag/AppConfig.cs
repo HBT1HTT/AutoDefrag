@@ -9,7 +9,7 @@ namespace AutoDefrag;
 /// </summary>
 public sealed class AppConfig
 {
-    public int ConfigVersion { get; set; } = 3;
+    public int ConfigVersion { get; set; } = 5;
 
     /// <summary>CPU 守护阈值(%)：高于该值时挂起 defrag。</summary>
     public int CpuThreshold { get; set; } = 70;
@@ -39,11 +39,35 @@ public sealed class AppConfig
     /// <summary>主题：System / Light / Dark。</summary>
     public string Theme { get; set; } = "System";
 
-    /// <summary>
-    /// 界面字体（系统已安装字体族名，例如 "Microsoft YaHei UI"）。
+    /// <summary>界面字体（系统已安装字体族名，例如 "Microsoft YaHei UI"）。
     /// 空字符串表示使用推荐默认字体（Segoe UI Variable Text + 中文回退）。
     /// </summary>
     public string UiFont { get; set; } = "";
+
+    /// <summary>
+    /// 整理方式：
+    ///   Self   = 本程序整理（大容量存储块磁盘走文件级重写，小存储块仍用 defrag.exe）；
+    ///   System = 只调用 Windows 自带 defrag.exe（v1.2.0 行为）；
+    ///   Auto   = 按每块盘的存储块大小选择：&gt;4KB 用本程序整理，≤4KB 用 Windows 自带整理。
+    /// 默认 Auto。注意：v1.3.0 已保存过 EngineMode 的配置会保留用户选择；
+    /// v1.2.0 及更早的配置没有该字段，读取后按 Auto 处理（≤4KB 盘仍是系统整理，行为不突变）。
+    /// </summary>
+    public string EngineMode { get; set; } = "Auto";
+
+    /// <summary>
+    /// 主界面底部进度区是否展开（收起时只留一条细进度条 + 百分比）。
+    /// 默认收起；切换后立即保存，重启保持。
+    /// </summary>
+    public bool ProgressExpanded { get; set; } = false;
+
+    /// <summary>
+    /// 只整理碎片较多的文件。
+    /// false（默认）= 全部合格候选都处理；true = 只有文件级碎片率 ≥ FragThresholdPercent 的才处理。
+    /// </summary>
+    public bool FragThresholdEnabled { get; set; } = false;
+
+    /// <summary>文件级碎片率阈值（%），范围 1–15，默认 10。超出范围在读取时回落默认值。</summary>
+    public int FragThresholdPercent { get; set; } = 10;
 
     public static readonly Regex DailyTimeRegex =
         new(@"^(0|00:00|([01]\d|2[0-3]):[0-5]\d)$", RegexOptions.Compiled);
@@ -62,6 +86,8 @@ public sealed class AppConfig
         if (!DailyTimeRegex.IsMatch(DailyTime ?? string.Empty)) DailyTime = "03:00";
         if (NotificationTimeout < 10 || NotificationTimeout > 120) NotificationTimeout = 30;
         if (Theme is not ("System" or "Light" or "Dark")) Theme = "System";
+        if (EngineMode is not ("Self" or "System" or "Auto")) EngineMode = "Auto";
+        if (FragThresholdPercent < 1 || FragThresholdPercent > 15) FragThresholdPercent = 10;
         UiFont = (UiFont ?? string.Empty).Trim();
 
         if (SelectedDrives is not null)

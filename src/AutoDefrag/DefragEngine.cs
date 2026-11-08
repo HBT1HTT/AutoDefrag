@@ -2,6 +2,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using AutoDefrag.Rewrite;
 
 namespace AutoDefrag;
 
@@ -30,6 +31,9 @@ public static class DefragEngine
     /// <summary>defrag 的 FACILITY_DEFRAG 错误码，例如权限不足的 0x89000024。</summary>
     private static readonly Regex ErrorCodeRegex = new(@"0x89[0-9a-fA-F]{6}", RegexOptions.Compiled);
 
+    /// <summary>defrag 进度行里的百分比，例如“已完成 30%”“30% complete”。解析不到就不显示确定进度。</summary>
+    private static readonly Regex ProgressPercentRegex = new(@"(\d{1,3})\s*%", RegexOptions.Compiled);
+
     static DefragEngine()
     {
         // 控制台程序（defrag.exe）按 OEM 代码页输出，注册后才能正确解码中文报告
@@ -37,7 +41,8 @@ public static class DefragEngine
     }
 
 
-    public static int RunClean(string[] drives, int cpuThreshold, int highSeconds = 10, int lowSeconds = 10)
+    public static int RunClean(string[] drives, int cpuThreshold, string engineMode = "Self", int highSeconds = 10, int lowSeconds = 10,
+        int minFragmentPercent = 0)
     {
         var targets = FilterToFixed(drives);
         if (targets.Count == 0)
@@ -46,7 +51,15 @@ public static class DefragEngine
             return 2;
         }
 
-        Logger.Info($"================ 开始整理磁盘: 目标={string.Join(",", targets)} CPU上限={cpuThreshold}% 持续{highSeconds}s暂停/回落{lowSeconds}s继续 ================");
+        // 上次可能残留停止标记（例如在 worker 完成后才创建的），开始时清掉，避免本次一启动就停
+        ClearStopFlag();
+        ProgressLog.Begin();
+
+        var modeText = EngineResolver.ModeText(engineMode);
+        Logger.Info($"================ 开始整理磁盘: 目标={string.Join(",", targets)} CPU上限={cpuThreshold}% " +
+                    $"整理方式={modeText} 文件碎片率={(minFragmentPercent > 0 ? $"≥{minFragmentPercent}%" : "不限")} " +
+                    $"持续{highSeconds}s暂停/回落{lowSeconds}s继续 ================");
+        ProgressLog.Append($"开始整理：目标={string.Join(",", targets)}；整理方式={modeText}");
 
         var state = new WorkerStateFile
         {
@@ -54,7 +67,8 @@ public static class DefragEngine
             Stage = "准备中",
             DriveTotal = targets.Count,
             StartedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-            Message = "正在准备整理"
+            Message = "正在准备整理",
+            Percent = -1
         };
         state.Save();
 
@@ -62,11 +76,28 @@ public static class DefragEngine
 
         for (var index = 0; index < targets.Count; index++)
         {
+            if (File.Exists(AppPaths.StopFlagFile))
+            {
+                Logger.Warn("检测到停止标记，整理在开始前终止");
+                results.Add(new DriveRunResult(targets[index], DiskMediaKind.Unknown, "已停止", null, 0, 0,
+                    DateTime.Now, DateTime.Now, "已停止", null, null, 0));
+                break;
+            }
+
             var drive = targets[index];
             state.Drive = drive;
+            state.DriveLabel = drive.TrimEnd(':');
             state.DriveIndex = index + 1;
             state.Suspended = 0;
             state.Resumed = 0;
+            state.Percent = -1;
+            state.Phase = string.Empty;
+            state.CurrentFile = string.Empty;
+            state.FileIndex = 0;
+            state.FileTotal = 0;
+            state.ProcessedBytes = 0;
+            state.TotalBytes = 0;
+            state.SpeedBytesPerSec = 0;
             state.Message = $"正在分析 {drive} 的碎片率";
             state.Stage = "分析碎片";
             state.Save();
@@ -77,6 +108,35 @@ public static class DefragEngine
             var freeBytes = info is null ? 0 : SafeFreeBytes(info);
             var clusterBytes = Native.GetClusterSize(drive);
 
+            // 每块盘本轮实际采用的方式与判断依据（Auto 按存储块大小收敛）
+            var effective = EngineResolver.Effective(engineMode, clusterBytes);
+            var decision = EngineResolver.Describe(engineMode, clusterBytes);
+            state.Engine = EngineResolver.ShortName(effective);
+            state.EngineDetail = decision;
+            Logger.Info($"{drive} 整理方式决策: {decision}（配置={modeText}，存储块={DiskService.ClusterText(clusterBytes)}）");
+            ProgressLog.Append($"{drive} 整理方式: {decision}");
+
+            // 大簇卷：系统 defrag 无法真正整理，按实际采用的整理方式分流
+            if (DiskService.IsLargeCluster(clusterBytes))
+            {
+                if (effective == "System")
+                {
+                    Logger.Warn($"{drive} 的存储块为 {DiskService.ClusterText(clusterBytes)}（大于 4KB）：Windows 自带整理对该磁盘无效，" +
+                                "本次跳过并不报成功");
+                    ProgressLog.Append($"{drive} 跳过：{decision}");
+                    results.Add(new DriveRunResult(drive, media, "系统方式对大容量存储块磁盘无效", null, 0, 0,
+                        DateTime.Now, DateTime.Now, "系统方式无效（该磁盘）", null, null, clusterBytes));
+                    continue;
+                }
+
+                Logger.Info($"{drive} 的存储块为 {DiskService.ClusterText(clusterBytes)}（大于 4KB）：不使用系统 defrag，改走文件级重写整理");
+                var large = LargeClusterRunner.Run(drive, media, clusterBytes, state, dryRun: false,
+                    scanRoot: null, cpuThreshold: cpuThreshold, highSeconds: highSeconds, lowSeconds: lowSeconds,
+                    minFragmentPercent: minFragmentPercent, engineMode: engineMode);
+                results.Add(large);
+                continue;
+            }
+
             var preProbe = Probe(drive, volumeBytes);
             var preFrag = preProbe.FragPercent;
             if (media == DiskMediaKind.Hdd && preFrag is null)
@@ -85,13 +145,13 @@ public static class DefragEngine
             }
 
             var plan = BuildPlan(drive, media, preFrag, volumeBytes, freeBytes, clusterBytes);
-            Logger.Info($"计划 {drive}: 类型={DiskService.MediaText(media)} 存储块={DiskService.ClusterText(clusterBytes)} 命令={plan.CommandLine} 原因={plan.Reason}");
-            if (DiskService.IsLargeCluster(clusterBytes))
-            {
-                Logger.Warn($"{drive} 的存储块 {DiskService.ClusterText(clusterBytes)} 大于 4KB：Windows 自带的整理工具对这类磁盘支持存疑（可能不支持），" +
-                            "本次仍按计划尝试；如果看不到任何实际整理过程，结果会显示为“可能不支持”，不会报成功");
-            }
+            Logger.Info($"计划 {drive}: 类型={DiskService.MediaText(media)} 存储块={DiskService.ClusterText(clusterBytes)} " +
+                        $"整理方式={decision}（小存储块仍用系统 defrag） 命令={plan.CommandLine} 原因={plan.Reason}");
+            ProgressLog.Append($"{drive} 计划: {plan.CommandLine}；{decision}");
 
+            state.TotalBytes = 0;
+            state.Percent = -1;
+            state.Phase = string.Empty;
             state.Stage = $"正在{plan.Verb}";
             state.Message = $"正在{plan.Verb} {drive}（{DiskService.MediaText(media)}，第 {index + 1}/{targets.Count} 个磁盘）";
             state.Save();
@@ -100,31 +160,55 @@ public static class DefragEngine
 
             state.Stage = "分析碎片";
             state.Message = $"正在复核 {drive} 的碎片率";
+            state.Percent = -1;
+            state.Phase = string.Empty;
+            state.CurrentFile = string.Empty;
+            state.SpeedBytesPerSec = 0;
             state.Save();
             var postFrag = Probe(drive, volumeBytes).FragPercent;
 
             results.Add(new DriveRunResult(
                 drive, media, plan.Arguments, run.ExitCode, run.Suspended, run.Resumed,
-                run.StartTime, run.EndTime, run.Status, preFrag, postFrag));
+                run.StartTime, run.EndTime, run.Status, preFrag, postFrag, clusterBytes));
         }
 
         var okCount = results.Count(r => r.Status == "成功");
         var total = results.Count;
         var summary = string.Join("; ", results.Select(r =>
-            $"{r.Drive}[{DiskService.MediaText(r.Media)} {r.Arguments}] 状态={r.Status},exit={r.ExitCode?.ToString() ?? "--"},暂停={r.Suspended},继续={r.Resumed},碎片{FormatFrag(r.PreFrag)}->{FormatFrag(r.PostFrag)}"));
+            $"{r.Drive}[{DiskService.MediaText(r.Media)} 存储块={DiskService.ClusterText(r.ClusterBytes)} {r.Arguments} " +
+            $"方式={EngineResolver.Describe(engineMode, r.ClusterBytes)}] " +
+            $"状态={r.Status},exit={r.ExitCode?.ToString() ?? "--"},暂停={r.Suspended},继续={r.Resumed},碎片{FormatFrag(r.PreFrag)}->{FormatFrag(r.PostFrag)}"));
 
         Logger.Info($"全部完成: 成功={okCount}/{total}  累计暂停={results.Sum(r => r.Suspended)}次 继续={results.Sum(r => r.Resumed)}次   明细: {summary}");
         WriteLastResult(string.Join(",", targets), summary, okCount, total);
 
-        // 与旧脚本一致：Clean 跑完后写入"每日一次"锁
-        WriteLastRunDate();
+        // 与旧脚本一致：Clean 跑完后写入"每日一次"锁；
+        // 被用户中途停止时不写锁，让当天还能再整理一次
+        var anyStopped = results.Any(r => r.Status == "已停止");
+        if (anyStopped)
+        {
+            Logger.Warn("本次整理被用户停止，不写入每日锁（当天仍可再次触发）");
+        }
+        else
+        {
+            WriteLastRunDate();
+        }
+
+        ClearStopFlag();
 
         state.Stage = "完成";
         state.Drive = string.Empty;
-        state.Message = okCount == total
-            ? $"已完成 {total} 个磁盘"
-            : $"结束：成功 {okCount}/{total}";
+        state.DriveLabel = string.Empty;
+        state.Percent = -1;
+        state.Phase = string.Empty;
+        state.CurrentFile = string.Empty;
+        state.Message = anyStopped
+            ? $"已停止（成功 {okCount}/{total}）"
+            : okCount == total
+                ? $"已完成 {total} 个磁盘"
+                : $"结束：成功 {okCount}/{total}";
         state.Save();
+        ProgressLog.Append(anyStopped ? $"整理已停止：成功 {okCount}/{total}" : $"整理结束：成功 {okCount}/{total}");
 
         return okCount == total ? 0 : 1;
     }
@@ -141,6 +225,8 @@ public static class DefragEngine
         }
 
         Logger.Info($"================ 开始检查磁盘碎片: 目标={string.Join(",", targets)} ================");
+        ProgressLog.Begin();
+        ProgressLog.Append($"开始检查碎片：目标={string.Join(",", targets)}");
 
         var state = new WorkerStateFile
         {
@@ -148,7 +234,8 @@ public static class DefragEngine
             Stage = "检查磁盘",
             DriveTotal = targets.Count,
             StartedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-            Message = "正在读取碎片情况"
+            Message = "正在读取碎片情况",
+            Percent = 0
         };
         state.Save();
 
@@ -159,19 +246,50 @@ public static class DefragEngine
             state.Drive = drive;
             state.DriveIndex = index + 1;
             state.DriveTotal = targets.Count;
+            state.DriveLabel = drive.TrimEnd(':');
+            state.Percent = (int)(index * 100.0 / targets.Count);
             state.Message = $"正在检查 {drive}（{index + 1}/{targets.Count}）";
             state.Save();
 
             var info = FixedDriveByLetter(drive);
             var volumeBytes = info is null ? 0 : DiskService.TotalBytes(info);
-            var probe = Probe(drive, volumeBytes);
+            var clusterBytes = Native.GetClusterSize(drive);
+
+            double? frag;
+            bool probed;
+            if (DiskService.IsLargeCluster(clusterBytes))
+            {
+                // 大簇卷：defrag /A 会给出不可信的 0%，改用位图 + Runlist 自算
+                var analysis = VolumeAnalyzer.Analyze(drive, RewriteOptions.Quick);
+                frag = analysis?.FileFragmentationPercent;
+                probed = analysis is not null;
+                Logger.Info($"{drive} 大簇卷自算碎片率: {FormatFrag(frag)}（系统 defrag /A 在该簇大小下不可信，不再采用）");
+            }
+            else
+            {
+                var probe = Probe(drive, volumeBytes);
+                frag = probe.FragPercent;
+                probed = probe.FragPercent is not null;
+
+                // 一致性对比：同一卷上用自算口径再算一次，差异过大时写 WARN（两者统计对象不同，不要求相等）
+                var selfCheck = VolumeAnalyzer.Analyze(drive, RewriteOptions.Compare);
+                if (selfCheck is not null && frag is not null)
+                {
+                    var diff = Math.Abs(selfCheck.FileFragmentationPercent - frag.Value);
+                    var line = $"{drive} 碎片率口径对比: 系统 defrag /A={frag:0.##}%（按碎片文件空间/卷容量），" +
+                               $"自算={selfCheck.FileFragmentationPercent:0.##}%（按非最大区段簇数/已分析文件簇数），差异={diff:0.##} 个百分点";
+                    if (diff >= 10) Logger.Warn(line + "；两者分母不同，仅作参考");
+                    else Logger.Info(line);
+                }
+            }
+
             file.Drives.Add(new DriveStatusEntry
             {
                 Drive = drive,
                 VolumeSizeGB = volumeBytes > 0 ? Math.Round(volumeBytes / 1024.0 / 1024 / 1024, 2) : null,
                 FreeSpaceGB = info is null ? null : Math.Round(SafeFreeBytes(info) / 1024.0 / 1024 / 1024, 2),
-                FragPercent = probe.FragPercent,
-                Probed = probe.FragPercent is not null
+                FragPercent = frag,
+                Probed = probed
             });
         }
 
@@ -183,8 +301,10 @@ public static class DefragEngine
         // 检查磁盘只更新 drive_status.json，绝不覆盖 last_result.txt（那是整理结果）
 
         state.Stage = "完成";
+        state.Percent = -1;
         state.Message = "碎片情况检查完成";
         state.Save();
+        ProgressLog.Append("碎片检查完成");
 
         return 0;
     }
@@ -278,9 +398,27 @@ public static class DefragEngine
             return new DriveRunResult(drive, plan.Media, plan.Arguments, null, 0, 0, startTime, DateTime.Now, "启动失败", null, null);
         }
 
+        var lastLoggedPercent = -1;
+        void CaptureLine(string? line)
+        {
+            capture.Append(line);
+
+            // 尽量从 defrag 输出里取真实百分比；取不到就保持 Percent=-1（界面显示不确定态）
+            var percent = ParseProgressPercent(line);
+            if (percent is null) return;
+
+            var value = percent.Value;
+            state.Percent = value;
+            if (value >= lastLoggedPercent + 5 || value == 100)
+            {
+                lastLoggedPercent = value;
+                ProgressLog.Append($"{drive} {plan.Verb}进度 {value}%");
+            }
+        }
+
         // 必须持续排空输出，否则 defrag 的进度输出可能填满管道缓冲区导致进程卡死
-        process.OutputDataReceived += (_, e) => capture.Append(e.Data);
-        process.ErrorDataReceived += (_, e) => capture.Append(e.Data);
+        process.OutputDataReceived += (_, e) => CaptureLine(e.Data);
+        process.ErrorDataReceived += (_, e) => CaptureLine(e.Data);
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
@@ -293,6 +431,7 @@ public static class DefragEngine
         var phase = "Running";     // Running / Suspended
         var highCount = 0;
         var lowCount = 0;
+        var stopped = false;
 
         state.Suspended = 0;
         state.Resumed = 0;
@@ -303,6 +442,19 @@ public static class DefragEngine
         {
             Thread.Sleep(1000);
             if (HasExited(process)) break;
+
+            // 用户点“停止整理”：结束 defrag 进程，已完成的整理效果保留（系统整理本身是分段提交的）
+            if (File.Exists(AppPaths.StopFlagFile))
+            {
+                Logger.Warn($"检测到停止标记：正在结束 {drive} 的整理进程");
+                if (phase == "Suspended")
+                {
+                    Native.TryResume(process.Id, out _);
+                }
+                try { process.Kill(entireProcessTree: true); } catch (Exception ex) { Logger.Warn("结束整理进程失败: " + ex.Message); }
+                stopped = true;
+                break;
+            }
 
             var cpu = sampler.Sample();
             state.CpuPercent = Math.Round(cpu, 1);
@@ -384,7 +536,7 @@ public static class DefragEngine
         var elapsed = endTime - startTime;
         var output = capture.Text;
         var errorCode = FindErrorCode(output);
-        var status = ClassifyResult(plan, preFrag, exitCode, errorCode, output, elapsed);
+        var status = stopped ? "已停止" : ClassifyResult(plan, preFrag, exitCode, errorCode, output, elapsed);
 
         Logger.Info($"{drive} {plan.Verb}结束: 命令=defrag.exe {plan.CommandLine}, exit={FormatExit(exitCode)}, 状态={status}, 暂停={suspended}次, 继续={resumed}次, 用时={elapsed.TotalSeconds:N0}s");
         if (errorCode is not null)
@@ -392,8 +544,9 @@ public static class DefragEngine
             Logger.Warn($"{drive} 整理程序输出包含错误码 {errorCode}，按失败处理");
         }
         Logger.Info($"{drive} 整理程序输出片段: {(output.Length == 0 ? "(无输出)" : ClipForLog(output))}");
+        ProgressLog.Append($"{drive} {plan.Verb}结束: 状态={status}, exit={FormatExit(exitCode)}, 用时={elapsed.TotalSeconds:N0}s");
 
-        return new DriveRunResult(drive, plan.Media, plan.Arguments, exitCode, suspended, resumed, startTime, endTime, status, null, null);
+        return new DriveRunResult(drive, plan.Media, plan.Arguments, exitCode, suspended, resumed, startTime, endTime, status, null, null, plan.ClusterBytes);
     }
 
     private static bool HasExited(System.Diagnostics.Process process)
@@ -492,6 +645,17 @@ public static class DefragEngine
         if (string.IsNullOrEmpty(output)) return null;
         var match = ErrorCodeRegex.Match(output);
         return match.Success ? match.Value : null;
+    }
+
+    /// <summary>从 defrag 的输出行里提取进度百分比；没有或越界返回 null。</summary>
+    private static int? ParseProgressPercent(string? line)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return null;
+        var match = ProgressPercentRegex.Match(line);
+        if (!match.Success) return null;
+        if (!int.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
+            return null;
+        return value is >= 0 and <= 100 ? value : null;
     }
 
     private static string FormatExit(int? exitCode) => exitCode?.ToString() ?? "未知";
@@ -634,6 +798,23 @@ public static class DefragEngine
 
     private static string FormatFrag(double? value) => value is null ? "--" : $"{value:0.##}%";
 
+    /// <summary>开始新任务前清掉上次遗留的停止标记。</summary>
+    private static void ClearStopFlag()
+    {
+        try
+        {
+            if (File.Exists(AppPaths.StopFlagFile))
+            {
+                File.Delete(AppPaths.StopFlagFile);
+                Logger.Info("已清理上次遗留的停止标记");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn("清理停止标记失败: " + ex.Message);
+        }
+    }
+
     private static void WriteLastResult(string targets, string summary, int okCount, int total)
     {
         var line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 目标={targets} 成功={okCount}/{total} 明细={summary}";
@@ -731,4 +912,5 @@ public sealed record DriveRunResult(
     DateTime EndTime,
     string Status,
     double? PreFrag,
-    double? PostFrag);
+    double? PostFrag,
+    int ClusterBytes = 0);

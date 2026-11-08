@@ -77,6 +77,84 @@
                     </StackPanel>
                 </Border>
 
+                <!-- ================= 整理方式 ================= -->
+                <Border Style="{StaticResource Card}" Padding="18,20,18,20" Margin="0,10,0,0">
+                    <StackPanel>
+                        <TextBlock Text="整理方式" Style="{StaticResource CardTitle}" Margin="0,0,0,14" />
+
+                        <TextBlock Text="用哪种方式整理" FontSize="13.5" />
+                        <TextBlock Text="默认自动：按每块盘的存储块大小选择；也可手动固定为某一种"
+                                   Style="{StaticResource HintText}" TextWrapping="Wrap" Margin="0,2,0,12" />
+
+                        <Border Background="{DynamicResource ControlBackground}"
+                                BorderBrush="{DynamicResource ControlBorder}" BorderThickness="1"
+                                CornerRadius="8" Padding="3" HorizontalAlignment="Left">
+                            <StackPanel Orientation="Horizontal">
+                                <RadioButton x:Name="EngineSelf" Content="本程序整理"
+                                             Style="{StaticResource SegmentRadio}"
+                                             Tag="Self" Checked="Engine_Checked" />
+                                <RadioButton x:Name="EngineSystem" Content="Windows 自带整理"
+                                             Style="{StaticResource SegmentRadio}"
+                                             Tag="System" Checked="Engine_Checked" />
+                                <RadioButton x:Name="EngineAuto" Content="自动（推荐）"
+                                             Style="{StaticResource SegmentRadio}"
+                                             Tag="Auto" Checked="Engine_Checked" />
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock Text="{Binding EngineHint}" Style="{StaticResource HintText}"
+                                   TextWrapping="Wrap" Margin="0,12,0,0" />
+                    </StackPanel>
+                </Border>
+
+                <!-- ================= 整理范围 ================= -->
+                <Border Style="{StaticResource Card}" Padding="18,16" Margin="0,10,0,0">
+                    <StackPanel>
+                        <TextBlock Text="整理范围" Style="{StaticResource CardTitle}" Margin="0,0,0,12" />
+
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="只整理碎片较多的文件" FontSize="13.5" />
+                                <TextBlock Text="勾选后只处理碎片率达到阈值的文件；不勾选则全部整理"
+                                           Style="{StaticResource HintText}" />
+                            </StackPanel>
+                            <ToggleButton Grid.Column="1" Style="{StaticResource ToggleSwitch}"
+                                          IsChecked="{Binding FragThresholdEnabled, Mode=TwoWay}"
+                                          VerticalAlignment="Center" />
+                        </Grid>
+
+                        <Grid Visibility="{Binding FragThresholdVisibility}" Margin="0,0,0,6">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="碎片率阈值" FontSize="13.5" />
+                                <TextBlock Text="是每个文件自身的碎片率，不是整张磁盘" Style="{StaticResource HintText}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBox Width="64" MaxLength="2" Style="{StaticResource FluentTextBox}"
+                                         Text="{Binding FragThresholdText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         PreviewTextInput="FragThreshold_PreviewTextInput"
+                                         PreviewKeyDown="FragThreshold_PreviewKeyDown"
+                                         DataObject.Pasting="FragThreshold_Pasting" />
+                                <TextBlock Text="%" Margin="6,0,0,0" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Grid>
+
+                        <TextBlock Text="阈值范围 1–15%，默认 10%。调低更彻底但耗时更长；调高更快，但会留下较多零头。"
+                                   Style="{StaticResource HintText}" TextWrapping="Wrap" Margin="0,2,0,0" />
+
+                        <TextBlock Text="碎片率阈值只能是 1–15 的整数，超出范围不会保存"
+                                   Foreground="{DynamicResource Danger}" FontSize="12"
+                                   Visibility="{Binding FragThresholdErrorVisibility}" Margin="0,6,0,0" />
+                    </StackPanel>
+                </Border>
+
                 <!-- ================= 自动整理 ================= -->
                 <Border Style="{StaticResource Card}" Padding="18,16" Margin="0,10,0,0">
                     <StackPanel>

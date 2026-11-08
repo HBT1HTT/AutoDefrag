@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Windows;
+using System.Windows.Input;
 using System.Windows.Media.Imaging;
 
 namespace AutoDefrag;
@@ -25,7 +26,12 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
     private string _timeText;
     private string _selectedFont;
     private string _themeMode;
+    private string _engineMode;
     private bool _timeInvalid;
+
+    private bool _fragThresholdEnabled;
+    private string _fragThresholdText;
+    private bool _fragThresholdInvalid;
 
     public SettingsWindow(MainViewModel viewModel)
     {
@@ -40,6 +46,9 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         _cpuThreshold = _vm.CpuThreshold;
         _selectedFont = _vm.SelectedFont;
         _themeMode = _vm.ThemeMode;
+        _engineMode = _vm.EngineMode;
+        _fragThresholdEnabled = _vm.FragThresholdEnabled;
+        _fragThresholdText = _vm.FragThresholdPercent.ToString();
 
         DataContext = this;
 
@@ -57,6 +66,19 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
                 break;
             default:
                 ThemeSystem.IsChecked = true;
+                break;
+        }
+
+        switch (_engineMode)
+        {
+            case "System":
+                EngineSystem.IsChecked = true;
+                break;
+            case "Auto":
+                EngineAuto.IsChecked = true;
+                break;
+            default:
+                EngineSelf.IsChecked = true;
                 break;
         }
 
@@ -87,6 +109,23 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         get => _themeMode;
         set => SetField(ref _themeMode, value);
     }
+
+    public string EngineMode
+    {
+        get => _engineMode;
+        set
+        {
+            if (!SetField(ref _engineMode, value)) return;
+            OnPropertyChanged(nameof(EngineHint));
+        }
+    }
+
+    public string EngineHint => _engineMode switch
+    {
+        "System" => "调用 Windows 自带的整理工具，和旧版一致。对每块大于 4KB 的磁盘（例如 64KB、128KB）无效，会提示跳过，不会假装成功。",
+        "Auto" => "默认选择。按每块盘的存储块大小自动选：大于 4KB 用本程序整理，不超过 4KB 用 Windows 自带整理。已有的旧配置保存过的选择不会被改动。",
+        _ => "大容量存储块磁盘由本程序逐个重写文件来整理，可以真的减少碎片；小存储块磁盘仍用系统整理，更稳更快。重写会把文件完整读写一遍，耗时约等于复制该文件。"
+    };
 
     public bool ScheduleEnabled
     {
@@ -146,6 +185,34 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
     public Visibility TimeErrorVisibility =>
         _timeInvalid ? Visibility.Visible : Visibility.Collapsed;
 
+    // ---------------------------------------------------------------- 整理范围
+
+    public bool FragThresholdEnabled
+    {
+        get => _fragThresholdEnabled;
+        set
+        {
+            if (!SetField(ref _fragThresholdEnabled, value)) return;
+            OnPropertyChanged(nameof(FragThresholdVisibility));
+        }
+    }
+
+    public Visibility FragThresholdVisibility =>
+        _fragThresholdEnabled ? Visibility.Visible : Visibility.Collapsed;
+
+    public string FragThresholdText
+    {
+        get => _fragThresholdText;
+        set
+        {
+            if (!SetField(ref _fragThresholdText, value)) return;
+            if (_fragThresholdInvalid) SetFragThresholdInvalid(false);
+        }
+    }
+
+    public Visibility FragThresholdErrorVisibility =>
+        _fragThresholdInvalid ? Visibility.Visible : Visibility.Collapsed;
+
     // ---------------------------------------------------------------- 操作
 
     private void Theme_Checked(object sender, RoutedEventArgs e)
@@ -153,6 +220,77 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         if (!IsLoaded) return;
         if ((sender as FrameworkElement)?.Tag is string tag)
             SelectedTheme = tag;
+    }
+
+    private void Engine_Checked(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        if ((sender as FrameworkElement)?.Tag is string tag)
+            EngineMode = tag;
+    }
+
+    // ------------------------------------------------------- 阈值输入框过滤
+
+    /// <summary>
+    /// 输入阶段只放行 0–9 的单个字符，并且保证输入后总长度不超过 2 位（最大值 15）；
+    /// 0、16 这类两位以内的数字可以先显示出来，保存时再按 1–15 拒绝并提示。
+    /// </summary>
+    private void FragThreshold_PreviewTextInput(object sender, TextCompositionEventArgs e)
+    {
+        var box = (TextBox)sender;
+        e.Handled = !AcceptsDigitInput(e.Text, box.Text, box.SelectionStart, box.SelectionLength);
+    }
+
+    /// <summary>只接受 ASCII 数字，且输入后总长度不超过 2 位（最大值 15）。</summary>
+    private static bool AcceptsDigitInput(string input, string current, int selectionStart, int selectionLength)
+    {
+        if (!IsAsciiDigits(input)) return false;
+        var proposed = current.Remove(selectionStart, selectionLength).Insert(selectionStart, input);
+        return proposed.Length <= 2;
+    }
+
+    /// <summary>空格不会进入数字框；退格、删除、方向键、Home/End、Tab、Ctrl 组合键都保持可用。</summary>
+    private void FragThreshold_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == Key.Space) e.Handled = true;
+    }
+
+    /// <summary>粘贴只保留 ASCII 数字；全是字母/符号/中文时不插入内容，且最多保留 2 位。</summary>
+    private void FragThreshold_Pasting(object sender, DataObjectPastingEventArgs e)
+    {
+        var box = (TextBox)sender;
+        var raw = e.DataObject.GetData(System.Windows.DataFormats.UnicodeText) as string
+                  ?? e.DataObject.GetData(System.Windows.DataFormats.Text) as string
+                  ?? string.Empty;
+
+        var available = 2 - (box.Text.Length - box.SelectionLength);
+        var digits = FilterPastedDigits(raw, available);
+        if (digits.Length == 0)
+        {
+            // 纯字母/符号/中文的粘贴直接忽略，等于没有插入
+            e.CancelCommand();
+            return;
+        }
+
+        e.DataObject = new System.Windows.DataObject(System.Windows.DataFormats.UnicodeText, digits);
+    }
+
+    /// <summary>粘贴内容只保留 ASCII 数字，最多 available 位；没有数字时返回空。</summary>
+    private static string FilterPastedDigits(string raw, int available)
+    {
+        if (available <= 0) return string.Empty;
+        var digits = new string(raw.Where(char.IsAsciiDigit).ToArray());
+        return digits.Length > available ? digits[..available] : digits;
+    }
+
+    private static bool IsAsciiDigits(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+        foreach (var c in text)
+        {
+            if (c is < '0' or > '9') return false;
+        }
+        return true;
     }
 
     private void Save_Click(object sender, RoutedEventArgs e)
@@ -163,6 +301,18 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
             if (!ClockRegex.IsMatch(time))
             {
                 SetTimeInvalid(true);
+                return;
+            }
+        }
+
+        var fragPercent = 0;
+        if (_fragThresholdEnabled)
+        {
+            fragPercent = ParseFragThreshold(_fragThresholdText);
+            if (fragPercent is < 1 or > 15)
+            {
+                // 超出范围直接拒绝保存并提示，不静默截断
+                SetFragThresholdInvalid(true);
                 return;
             }
         }
@@ -184,6 +334,9 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         _vm.MinimizeToTray = _minimizeToTray;
         _vm.SelectedFont = _selectedFont;
         _vm.SetTheme(_themeMode);
+        _vm.EngineMode = _engineMode;
+        _vm.FragThresholdEnabled = _fragThresholdEnabled;
+        if (_fragThresholdEnabled) _vm.FragThresholdPercent = fragPercent;
 
         Close();
     }
@@ -195,6 +348,21 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         if (_timeInvalid == invalid) return;
         _timeInvalid = invalid;
         OnPropertyChanged(nameof(TimeErrorVisibility));
+    }
+
+    private void SetFragThresholdInvalid(bool invalid)
+    {
+        if (_fragThresholdInvalid == invalid) return;
+        _fragThresholdInvalid = invalid;
+        OnPropertyChanged(nameof(FragThresholdErrorVisibility));
+    }
+
+    /// <summary>解析阈值输入；非数字或越界时返回 0，由调用方判定为无效。</summary>
+    private static int ParseFragThreshold(string? text)
+    {
+        var trimmed = (text ?? string.Empty).Trim().TrimEnd('%', '％').Trim();
+        if (!int.TryParse(trimmed, out var value)) return 0;
+        return value;
     }
 
     // ---------------------------------------------------------------- INotifyPropertyChanged

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
 using Drawing = System.Drawing;
@@ -40,6 +41,14 @@ public partial class App : System.Windows.Application
             return;
         }
 
+        // 一键 dry-run：只读预览，不建托盘、不开主窗口，做完直接退出
+        if (Rewrite.RewriteCommand.IsDryRunRequest(e.Args))
+        {
+            var code = Rewrite.RewriteCommand.Run(e.Args);
+            Shutdown(code);
+            return;
+        }
+
         AppPaths.Ensure();
         Logger.Init("app");
 
@@ -49,7 +58,9 @@ public partial class App : System.Windows.Application
         _mutex = new Mutex(true, @"Local\AutoDefrag.SingleInstance", out var createdNew);
         if (!createdNew)
         {
-            Logger.Info("检测到已有实例，本次启动不再创建托盘");
+            Logger.Info(silent
+                ? "检测到已有实例；本次为静默启动，不唤起窗口，也不创建托盘"
+                : "检测到已有实例，本次启动不再创建托盘，改为唤起已有窗口");
             SignalExistingInstance(showWindow: !silent);
             Shutdown(0);
             return;
@@ -130,18 +141,35 @@ public partial class App : System.Windows.Application
 
     // ------------------------------------------------------------------ 单实例
 
+    /// <summary>
+    /// 通知已有实例把主窗口叫出来。唯一实例刚启动时监听线程可能还没就绪，
+    /// 因此重试几次，并把结果写日志——避免用户点了 exe 却“什么都没发生”。
+    /// </summary>
     private void SignalExistingInstance(bool showWindow)
     {
         if (!showWindow) return;
-        try
+        for (var attempt = 0; attempt < 6; attempt++)
         {
-            using var handle = EventWaitHandle.OpenExisting(@"Local\AutoDefrag.ShowWindow");
-            handle.Set();
+            try
+            {
+                using var handle = EventWaitHandle.OpenExisting(@"Local\AutoDefrag.ShowWindow");
+                handle.Set();
+                Logger.Info("已请求已有实例显示主窗口，本次启动退出");
+                return;
+            }
+            catch (WaitHandleCannotBeOpenedException)
+            {
+                // 已有实例可能仍在初始化（监听线程未创建），稍等再试
+                Thread.Sleep(150);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"通知已有实例失败: {ex.Message}");
+                return;
+            }
         }
-        catch
-        {
-            // 上一实例正在退出，忽略
-        }
+
+        Logger.Warn("已有实例未响应显示请求（可能正在启动或退出），本次启动退出");
     }
 
     private void StartShowWindowListener()
@@ -194,6 +222,12 @@ public partial class App : System.Windows.Application
         var scheduleItem = new WinForms.ToolStripMenuItem("暂停自动整理");
         scheduleItem.Click += (_, _) => Ui(() => _vm?.ToggleSchedule());
 
+        var stopItem = new WinForms.ToolStripMenuItem("停止整理");
+        stopItem.Click += (_, _) => Ui(() => _vm?.StopClean());
+
+        var previewItem = new WinForms.ToolStripMenuItem("预览整理（不动磁盘）");
+        previewItem.Click += (_, _) => Ui(OpenPreview);
+
         var logItem = new WinForms.ToolStripMenuItem("查看日志");
         logItem.Click += (_, _) => Ui(OpenLog);
 
@@ -207,6 +241,8 @@ public partial class App : System.Windows.Application
             settingsItem,
             new WinForms.ToolStripSeparator(),
             runItem,
+            stopItem,
+            previewItem,
             scheduleItem,
             logItem,
             new WinForms.ToolStripSeparator(),
@@ -218,6 +254,7 @@ public partial class App : System.Windows.Application
             scheduleItem.Text = _vm?.ScheduleEnabled == false ? "恢复自动整理" : "暂停自动整理";
             runItem.Text = _vm?.IsBusy == true ? "正在整理…" : "立即整理";
             runItem.Enabled = _vm?.IsBusy != true;
+            stopItem.Enabled = _vm?.IsBusy == true;
         };
 
         _tray.ContextMenuStrip = _trayMenu;
@@ -290,6 +327,13 @@ public partial class App : System.Windows.Application
         };
         var timeout = Math.Clamp((_vm?.NotificationTimeout ?? 10) * 1000, 3000, 10000);
         _tray.ShowBalloonTip(timeout, title, text, icon);
+    }
+
+    /// <summary>托盘“预览整理”：只读分析大簇卷，生成报告，不改动任何文件；进度显示在主界面进度区。</summary>
+    private void OpenPreview()
+    {
+        Logger.Info("托盘请求预览整理");
+        _vm?.StartPreview();
     }
 
     public void OpenLog()

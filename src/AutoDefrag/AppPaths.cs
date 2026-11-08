@@ -26,6 +26,15 @@ public static class AppPaths
     public static string LastRunFile => Path.Combine(DataDir, "last_run.txt");
     public static string WorkerStateFile => Path.Combine(DataDir, "worker_state.json");
 
+    /// <summary>大簇卷文件级重写报告。</summary>
+    public static string RewriteReportFile => Path.Combine(DataDir, "rewrite_report.txt");
+
+    /// <summary>dry-run 预览报告（与真实执行结果分开存放）。</summary>
+    public static string RewritePreviewFile => Path.Combine(DataDir, "rewrite_preview.txt");
+
+    /// <summary>存在该文件时，重写在下一个文件前体面停止。</summary>
+    public static string StopFlagFile => Path.Combine(DataDir, "rewrite_stop.flag");
+
     /// <summary>旧脚本放在 exe 目录 Data\config.json；若 Root 退回 LocalAppData 时用它做一次性迁移。</summary>
     public static string LegacyConfigFile => Path.Combine(ExeDir, "Data", "config.json");
     public static string LegacyLastRunFile => Path.Combine(ExeDir, "Data", "last_run.txt");

@@ -26,7 +26,8 @@ public sealed class WorkerService
         }
     }
 
-    public bool Start(string mode, string[]? drives, int threshold, bool auto, out string? error)
+    public bool Start(string mode, string[]? drives, int threshold, bool auto, out string? error, string engine = "Self",
+        int minFragmentPercent = 0)
     {
         error = null;
         if (IsRunning)
@@ -35,7 +36,7 @@ public sealed class WorkerService
             return false;
         }
 
-        var arguments = BuildArguments(mode, drives, threshold);
+        var arguments = BuildArguments(mode, drives, threshold, engine, minFragmentPercent);
         var psi = new ProcessStartInfo
         {
             FileName = AppPaths.ExePath,
@@ -69,7 +70,9 @@ public sealed class WorkerService
         Mode = mode;
         IsAuto = auto;
         var modeName = mode == "clean" ? "整理磁盘" : "检查磁盘";
-        var thresholdText = mode == "clean" ? $", CPU上限={threshold}%" : string.Empty;
+        var thresholdText = mode == "clean"
+            ? $", CPU上限={threshold}%" + (minFragmentPercent > 0 ? $", 文件碎片率≥{minFragmentPercent}%" : ", 全部整理")
+            : string.Empty;
         Logger.Info($"已开始后台任务 (PID={_pid}, 模式={modeName}, 自动={auto}, 目标={(drives is { Length: > 0 } ? string.Join(",", drives) : "(自动)")}{thresholdText})");
         return true;
     }
@@ -93,7 +96,7 @@ public sealed class WorkerService
         return true;
     }
 
-    private static string BuildArguments(string mode, string[]? drives, int threshold)
+    private static string BuildArguments(string mode, string[]? drives, int threshold, string engine, int minFragmentPercent)
     {
         var sb = new StringBuilder("--worker ").Append(mode);
         if (drives is { Length: > 0 })
@@ -103,6 +106,8 @@ public sealed class WorkerService
         if (mode == "clean")
         {
             sb.Append(" --threshold ").Append(Math.Clamp(threshold, 10, 100));
+            sb.Append(" --engine ").Append(EngineResolver.IsValid(engine) ? engine : "Self");
+            sb.Append(" --minfrag ").Append(minFragmentPercent is >= 1 and <= 15 ? minFragmentPercent : 0);
         }
         return sb.ToString();
     }

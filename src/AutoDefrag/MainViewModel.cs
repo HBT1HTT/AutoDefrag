@@ -36,6 +36,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _selectedFont;
     private string _largeClusterHint = string.Empty;
 
+    // 主界面底部进度区
+    private bool _previewing;
+    private bool _stopping;
+    private int _progressPercent = -1;
+    private string _progressTitle = "就绪";
+    private string _progressDetail = string.Empty;
+    private string _progressPercentText = "就绪";
+    private string _progressLogText = string.Empty;
+    private readonly ObservableCollection<string> _progressLines = new();
+    private long _progressOffset;
+    private const int ProgressLogMaxLines = 200;
+
     public MainViewModel(AppConfig config, ConfigStore store)
     {
         _config = config;
@@ -119,7 +131,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         OnPropertyChanged(nameof(NextRunText));
 
-        if (_worker.IsRunning || _isBusy) return;
+        if (_worker.IsRunning || _isBusy || _previewing) return;
         if (GetDailyDecision() != "run") return;
 
         _triggeredDate = Today;   // 先记下本会话今日已触发，避免 30s 反复重试
@@ -165,7 +177,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public void RefreshDisks()
     {
         var firstRun = _config.SelectedDrives is null;
-        var largeClusterNotes = new List<string>();
 
         _suppressSave = true;
         Disks.Clear();
@@ -179,8 +190,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
             string? toolTip = null;
             if (DiskService.IsLargeCluster(clusterBytes))
             {
-                toolTip = $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），Windows 自带的整理工具可能整理不了，结果会显示成“可能不支持”，具体可以看日志。";
-                largeClusterNotes.Add($"{letter} 的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），Windows 自带整理工具可能整理不了");
+                var effective = EngineResolver.Effective(_config.EngineMode, clusterBytes);
+                toolTip = effective == "System"
+                    ? $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），Windows 自带的整理对它无效，选中后会被跳过并提示原因。"
+                    : $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），会用本程序重写文件来整理，逐个处理、可随时停止。";
             }
 
             Disks.Add(new DiskItem(
@@ -203,18 +216,35 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         _suppressSave = false;
 
-        _largeClusterHint = largeClusterNotes.Count > 0
-            ? string.Join("；", largeClusterNotes) + "。整理结果会如实显示成“可能不支持”，具体可以看日志。"
-            : string.Empty;
+        UpdateLargeClusterHint();
 
         OnPropertyChanged(nameof(HasDisks));
-        OnPropertyChanged(nameof(LargeClusterHint));
-        OnPropertyChanged(nameof(LargeClusterHintVisibility));
         OnPropertyChanged(nameof(EmptyHintVisibility));
         OnPropertyChanged(nameof(SelectedCount));
         OnPropertyChanged(nameof(CanStart));
         OnPropertyChanged(nameof(SelectAllText));
         RaiseSelectionSummary();
+    }
+
+    /// <summary>用通俗说法提示“这块磁盘走了哪条整理路径”。</summary>
+    private void UpdateLargeClusterHint()
+    {
+        var notes = new List<string>();
+        foreach (var disk in Disks)
+        {
+            var clusterBytes = Native.GetClusterSize(disk.Letter);
+            if (!DiskService.IsLargeCluster(clusterBytes)) continue;
+
+            var effective = EngineResolver.Effective(_config.EngineMode, clusterBytes);
+            var auto = _config.EngineMode == EngineResolver.Auto ? "自动判断为" : string.Empty;
+            notes.Add(effective == "System"
+                ? $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），{auto}Windows 自带整理对它无效，会自动跳过并写日志"
+                : $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），{auto}用本程序重写文件来整理");
+        }
+
+        _largeClusterHint = notes.Count > 0 ? string.Join("；", notes) + "。" : string.Empty;
+        OnPropertyChanged(nameof(LargeClusterHint));
+        OnPropertyChanged(nameof(LargeClusterHintVisibility));
     }
 
     public bool HasDisks => Disks.Count > 0;
@@ -228,7 +258,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public int SelectedCount => Disks.Count(d => d.IsSelected);
 
-    public bool CanStart => !_isBusy && SelectedCount > 0;
+    public bool CanStart => !_isBusy && !_previewing && SelectedCount > 0;
 
     public string SelectAllText =>
         Disks.Count > 0 && Disks.All(d => d.IsSelected) ? "取消全选" : "全选";
@@ -487,7 +517,76 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    public string StartButtonText => _isBusy ? "正在整理…" : "立即整理";
+    public string StartButtonText => _previewing ? "正在预览…" : _isBusy ? "正在整理…" : "立即整理";
+
+    /// <summary>忙时显示“停止整理”，让用户能体面中止（当前文件做完就停）。</summary>
+    public Visibility StopButtonVisibility => _isBusy ? Visibility.Visible : Visibility.Collapsed;
+
+    public string EngineMode
+    {
+        get => _config.EngineMode;
+        set
+        {
+            if (!EngineResolver.IsValid(value)) return;
+            if (_config.EngineMode == value) return;
+
+            _config.EngineMode = value;
+            _store.Save(_config);
+            Logger.Info("整理方式已切换: " + EngineModeText);
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(EngineModeText));
+            OnPropertyChanged(nameof(EngineModeHint));
+            RefreshDisks();
+        }
+    }
+
+    public string EngineModeText => EngineResolver.ModeText(_config.EngineMode);
+
+    public string EngineModeHint => _config.EngineMode switch
+    {
+        EngineResolver.System =>
+            "调用 Windows 自带的 defrag.exe，和 1.2.0 相同；对每块大于 4KB 的磁盘无效，会提示跳过而不是假装成功。",
+        EngineResolver.Auto =>
+            "推荐。按每块盘的存储块大小自动选：大于 4KB 用本程序整理，不超过 4KB 用 Windows 自带整理。已有用户保存过的选择不会被改动。",
+        _ =>
+            "大容量存储块磁盘（每块大于 4KB）由本程序重写文件来整理；小存储块磁盘仍调用系统 defrag，效果更稳。重写会完整读写一遍文件，耗时约等于复制。"
+    };
+
+    /// <summary>只整理碎片较多的文件（关闭时全部整理）。</summary>
+    public bool FragThresholdEnabled
+    {
+        get => _config.FragThresholdEnabled;
+        set
+        {
+            if (_config.FragThresholdEnabled == value) return;
+            _config.FragThresholdEnabled = value;
+            _store.Save(_config);
+            Logger.Info("整理范围已切换: " + FragThresholdText);
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(FragThresholdText));
+        }
+    }
+
+    /// <summary>文件级碎片率阈值（1–15）；越界值直接忽略，由设置界面负责提示。</summary>
+    public int FragThresholdPercent
+    {
+        get => _config.FragThresholdPercent;
+        set
+        {
+            if (value < 1 || value > 15) return;
+            if (_config.FragThresholdPercent == value) return;
+            _config.FragThresholdPercent = value;
+            _store.Save(_config);
+            Logger.Info("文件碎片率阈值已改为 " + value + "%");
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(FragThresholdText));
+        }
+    }
+
+    public string FragThresholdText =>
+        _config.FragThresholdEnabled
+            ? $"只整理碎片率 ≥ {_config.FragThresholdPercent}% 的文件"
+            : "全部整理";
 
     public bool IsBusy
     {
@@ -499,7 +598,129 @@ public sealed class MainViewModel : INotifyPropertyChanged
             OnPropertyChanged();
             OnPropertyChanged(nameof(CanStart));
             OnPropertyChanged(nameof(StartButtonText));
+            OnPropertyChanged(nameof(StopButtonVisibility));
+            RaiseProgressStateChanged();
         }
+    }
+
+    // ---------------------------------------------------------------- 底部进度区
+
+    /// <summary>收起/展开状态持久化在 config.json 的 ProgressExpanded。</summary>
+    public bool ProgressExpanded
+    {
+        get => _config.ProgressExpanded;
+        private set
+        {
+            if (_config.ProgressExpanded == value) return;
+            _config.ProgressExpanded = value;
+            _store.Save(_config);
+            Logger.Info(value ? "进度详情已展开" : "进度详情已收起");
+            OnPropertyChanged();
+            RaiseProgressStateChanged();
+        }
+    }
+
+    public void ToggleProgressExpanded() => ProgressExpanded = !ProgressExpanded;
+
+    /// <summary>整理或预览进行中；空闲时不显示进度条。</summary>
+    public bool ProgressActive => _isBusy || _previewing;
+
+    public Visibility ProgressCollapsedVisibility =>
+        !ProgressExpanded ? Visibility.Visible : Visibility.Collapsed;
+
+    public Visibility ProgressExpandedVisibility =>
+        ProgressExpanded ? Visibility.Visible : Visibility.Collapsed;
+
+    public Visibility ProgressTrackVisibility =>
+        ProgressActive ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>百分比未知时走不确定态（动画条），不编造进度。</summary>
+    public bool ProgressIndeterminate => ProgressActive && _progressPercent < 0;
+
+    public double ProgressPercentValue => _progressPercent < 0 ? 0 : Math.Clamp(_progressPercent, 0, 100);
+
+    public string ProgressPercentText => _progressPercentText;
+    public string ProgressTitle => _progressTitle;
+    public string ProgressDetail => _progressDetail;
+    public string ProgressGlyph => ProgressExpanded ? "▾" : "▸";
+    public string ProgressToggleTip => ProgressExpanded ? "收起整理详情" : "展开整理详情";
+
+    /// <summary>类 cmd 的滚动日志，最多保留最近 200 行。</summary>
+    public string ProgressLogText
+    {
+        get => _progressLogText;
+        private set
+        {
+            if (_progressLogText == value) return;
+            _progressLogText = value;
+            OnPropertyChanged();
+        }
+    }
+
+    private void RaiseProgressStateChanged()
+    {
+        OnPropertyChanged(nameof(ProgressActive));
+        OnPropertyChanged(nameof(ProgressCollapsedVisibility));
+        OnPropertyChanged(nameof(ProgressExpandedVisibility));
+        OnPropertyChanged(nameof(ProgressTrackVisibility));
+        OnPropertyChanged(nameof(ProgressIndeterminate));
+        OnPropertyChanged(nameof(ProgressPercentValue));
+        OnPropertyChanged(nameof(ProgressPercentText));
+        OnPropertyChanged(nameof(ProgressTitle));
+        OnPropertyChanged(nameof(ProgressDetail));
+        OnPropertyChanged(nameof(ProgressGlyph));
+        OnPropertyChanged(nameof(ProgressToggleTip));
+        OnPropertyChanged(nameof(CanStart));
+        OnPropertyChanged(nameof(StartButtonText));
+    }
+
+    private void SetProgress(string title, string detail, int percent)
+    {
+        _progressTitle = title;
+        _progressDetail = detail;
+        _progressPercent = percent >= 0 ? Math.Clamp(percent, 0, 100) : -1;
+        _progressPercentText = _progressPercent >= 0
+            ? $"{_progressPercent}%"
+            : ProgressActive ? "…" : "就绪";
+        RaiseProgressStateChanged();
+    }
+
+    /// <summary>新任务开始：清空上一次的日志与百分比，避免界面显示旧的“50%”。</summary>
+    private void BeginProgress(string title)
+    {
+        _progressLines.Clear();
+        _progressLogText = string.Empty;
+        _progressOffset = 0;
+        _stopping = false;
+        SetProgress(title, string.Empty, -1);
+        OnPropertyChanged(nameof(ProgressLogText));
+    }
+
+    private void FinishProgress(string detail)
+    {
+        _stopping = false;
+        _progressPercent = -1;
+        _progressPercentText = "就绪";
+        _progressTitle = "就绪";
+        _progressDetail = detail;
+        RaiseProgressStateChanged();
+        RefreshProgressLog();
+    }
+
+    /// <summary>增量读取 progress.log，只保留最近 N 行；同时更新界面日志文本。</summary>
+    private void RefreshProgressLog()
+    {
+        var (lines, offset) = ProgressLog.ReadNew(_progressOffset);
+        _progressOffset = offset;
+        if (lines.Count == 0) return;
+
+        foreach (var line in lines) _progressLines.Add(line);
+        while (_progressLines.Count > ProgressLogMaxLines)
+        {
+            _progressLines.RemoveAt(0);
+        }
+
+        ProgressLogText = string.Join(Environment.NewLine, _progressLines);
     }
 
     // ---------------------------------------------------------------- 触发任务
@@ -508,9 +729,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void StartClean(bool auto)
     {
-        if (_worker.IsRunning)
+        string? gateBusy = null;
+        if (_worker.IsRunning || _previewing || TaskGate.IsBusy(out gateBusy))
         {
-            FooterHint = "已有任务正在运行，请稍候";
+            FooterHint = gateBusy ?? "已有任务正在运行，请稍候";
+            if (!auto && gateBusy is not null)
+                NotificationRequested?.Invoke("AutoDefrag", gateBusy, NotifyLevel.Warning);
             return;
         }
 
@@ -527,7 +751,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        if (!_worker.Start("clean", drives.ToArray(), _config.CpuThreshold, auto, out var error))
+        if (!_worker.Start("clean", drives.ToArray(), _config.CpuThreshold, auto, out var error, _config.EngineMode,
+                _config.FragThresholdEnabled ? _config.FragThresholdPercent : 0))
         {
             StatusText = "空闲";
             FooterHint = error ?? "无法开始整理";
@@ -538,14 +763,42 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         IsBusy = true;
         StatusText = auto ? "自动整理中" : "正在整理";
-        FooterHint = $"正在整理 {string.Join("、", drives)} · CPU 占用超过 {_config.CpuThreshold}% 时会自动暂停";
+        FooterHint = $"正在整理 {string.Join("、", drives)}（{EngineModeText}）· " +
+                     (_config.FragThresholdEnabled ? $"仅整理碎片率 ≥ {_config.FragThresholdPercent}% 的文件 · " : "全部整理 · ") +
+                     $"CPU 占用超过 {_config.CpuThreshold}% 时会自动暂停";
+        BeginProgress($"正在准备整理 {string.Join("、", drives)}");
+    }
+
+    /// <summary>请求停止：写停止标记，大簇卷在当前文件结束后停，小簇卷直接结束 defrag 进程。</summary>
+    public void StopClean()
+    {
+        try
+        {
+            AppPaths.Ensure();
+            File.WriteAllText(AppPaths.StopFlagFile,
+                $"stop requested at {DateTime.Now:yyyy-MM-dd HH:mm:ss}", System.Text.UTF8Encoding.UTF8);
+            StatusText = "正在停止";
+            FooterHint = "已请求停止：当前文件做完就停，已完成的文件不会回滚";
+            _stopping = true;
+            SetProgress("正在停止", "等待当前文件处理完，已完成的文件不会回滚", -1);
+            NotificationRequested?.Invoke("AutoDefrag", "已请求停止，当前文件做完就会停下", NotifyLevel.Info);
+            Logger.Info("用户请求停止整理");
+        }
+        catch (Exception ex)
+        {
+            FooterHint = "停止请求失败: " + ex.Message;
+            Logger.Warn("写入停止标记失败: " + ex.Message);
+        }
     }
 
     public void StartProbe()
     {
-        if (_worker.IsRunning)
+        string? gateBusy = null;
+        if (_worker.IsRunning || _previewing || TaskGate.IsBusy(out gateBusy))
         {
-            FooterHint = "已有任务正在运行，请稍候";
+            FooterHint = gateBusy ?? "已有任务正在运行，请稍候";
+            if (gateBusy is not null)
+                NotificationRequested?.Invoke("AutoDefrag", gateBusy, NotifyLevel.Warning);
             return;
         }
 
@@ -567,6 +820,75 @@ public sealed class MainViewModel : INotifyPropertyChanged
         IsBusy = true;
         StatusText = "正在检查磁盘";
         FooterHint = "正在读取各磁盘的碎片情况（需要管理员权限）";
+        BeginProgress("正在检查磁盘碎片");
+    }
+
+    /// <summary>托盘“预览整理”：分析大簇卷并写报告，不动任何文件；进度区同样显示过程。</summary>
+    public void StartPreview()
+    {
+        string? gateBusy = null;
+        if (_worker.IsRunning || _isBusy || _previewing || TaskGate.IsBusy(out gateBusy))
+        {
+            FooterHint = gateBusy ?? "已有任务正在运行，请稍候";
+            if (gateBusy is not null)
+                NotificationRequested?.Invoke("AutoDefrag", gateBusy, NotifyLevel.Warning);
+            return;
+        }
+
+        var drives = DiskService.GetFixedDrives().Select(DiskService.Letter)
+            .Where(letter => DiskService.IsLargeCluster(Native.GetClusterSize(letter)))
+            .ToList();
+
+        if (drives.Count == 0)
+        {
+            NotificationRequested?.Invoke("AutoDefrag",
+                "没有大于 4KB 存储块的固定磁盘，预览整理只对这些磁盘有意义",
+                NotifyLevel.Info);
+            return;
+        }
+
+        _previewing = true;
+        StatusText = "正在预览";
+        FooterHint = $"正在预览 {string.Join("、", drives)} 的整理计划（只读分析，不会改动文件）";
+        BeginProgress($"正在预览整理计划 {string.Join("、", drives)}");
+        RaiseProgressStateChanged();
+
+        var previewDrives = drives.ToArray();
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            var code = 3;
+            try
+            {
+                code = Rewrite.RewriteCommand.RunDrives(previewDrives, dryRun: true, quiet: false);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("预览整理失败: " + ex.Message);
+                code = 1;
+            }
+            finally
+            {
+                System.Windows.Application.Current?.Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    _previewing = false;
+                    if (code == 3)
+                    {
+                        StatusText = "空闲";
+                        FooterHint = "已有另一个整理/预览任务正在运行，本次预览没有执行";
+                        FinishProgress("已有另一个任务正在运行");
+                        NotificationRequested?.Invoke("AutoDefrag",
+                            "已有另一个整理/预览任务正在运行，本次预览没有执行", NotifyLevel.Warning);
+                        return;
+                    }
+
+                    StatusText = "空闲";
+                    FooterHint = "预览完成：只读分析，没有改动任何文件";
+                    FinishProgress("预览完成（未改动任何文件）");
+                    NotificationRequested?.Invoke("AutoDefrag", "预览完成，报告已写入 Data/rewrite_preview.txt",
+                        NotifyLevel.Info);
+                }));
+            }
+        });
     }
 
     // ---------------------------------------------------------------- worker 看门狗
@@ -585,15 +907,25 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
+        // 预览在应用内后台线程运行，也需要刷新进度区
+        if (_previewing)
+        {
+            UpdateProgress();
+            return;
+        }
+
         if (_isBusy)
         {
             IsBusy = false;
             StatusText = "空闲";
+            FinishProgress("上次任务已结束");
         }
     }
 
     private void UpdateProgress()
     {
+        RefreshProgressLog();
+
         var state = WorkerStateFile.TryLoad();
         if (state is null) return;
 
@@ -601,27 +933,73 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             StatusText = "空闲";
             FooterHint = state.Message;
+            SetProgress(_stopping ? "正在停止" : "收尾中", state.Message, _stopping ? -1 : state.Percent);
             return;
         }
+
+        var title = BuildProgressTitle(state);
+        var detail = BuildProgressDetail(state);
 
         if (string.Equals(state.Mode, "status", StringComparison.OrdinalIgnoreCase))
         {
             StatusText = "正在检查磁盘";
-            FooterHint = $"正在检查 {state.Drive} · {state.DriveIndex}/{state.DriveTotal}";
+            FooterHint = $"{title} · {detail}";
+            SetProgress(title, detail, state.Percent);
+            return;
+        }
+
+        if (_stopping)
+        {
+            StatusText = "正在停止";
+            FooterHint = "已请求停止，等待当前文件完成";
+            SetProgress("正在停止", detail, -1);
             return;
         }
 
         if (state.Stage == "分析碎片")
         {
             StatusText = _worker.IsAuto ? "自动整理中" : "正在整理";
-            FooterHint = $"{state.Drive} · 正在读取碎片情况";
+            FooterHint = $"{title} · {detail}";
+            SetProgress(title, detail, state.Percent);
             return;
         }
 
         var verb = state.Stage == "正在优化" ? "优化" : "整理";
         StatusText = _worker.IsAuto ? $"自动{verb}中" : $"正在{verb}";
-        var progress = state.DriveTotal > 1 ? $"{state.DriveIndex}/{state.DriveTotal} " : string.Empty;
-        FooterHint = $"{progress}{state.Drive} · CPU {state.CpuPercent:0.#}% · 已暂停 {state.Suspended} 次";
+        var cpuInfo = state.CpuPercent > 0 ? $" · CPU {state.CpuPercent:0.#}%" : string.Empty;
+        FooterHint = $"{title} · {detail}{cpuInfo}";
+        SetProgress(title, detail, state.Percent);
+    }
+
+    private static string BuildProgressTitle(WorkerStateFile state)
+    {
+        var drive = state.DriveLabel.Length > 0 ? state.DriveLabel + ":" : state.Drive;
+        var mode = state.Mode;
+        if (string.Equals(mode, "status", StringComparison.OrdinalIgnoreCase))
+            return $"正在检查 {drive}（第 {state.DriveIndex}/{state.DriveTotal} 块磁盘）";
+        if (string.Equals(mode, "rewrite-preview", StringComparison.OrdinalIgnoreCase))
+            return $"正在预览 {drive} 的整理计划";
+        return $"正在整理 {drive}（第 {state.DriveIndex}/{state.DriveTotal} 块磁盘）";
+    }
+
+    private static string BuildProgressDetail(WorkerStateFile state)
+    {
+        var parts = new List<string>();
+        if (state.EngineDetail.Length > 0) parts.Add(state.EngineDetail);
+
+        var stage = state.Stage;
+        if (state.Phase.Length > 0 && !stage.EndsWith(state.Phase, StringComparison.Ordinal))
+            stage += " · " + state.Phase;
+        if (stage.Length > 0) parts.Add(stage);
+
+        if (state.FileTotal > 0) parts.Add($"文件 {state.FileIndex}/{state.FileTotal}");
+        if (state.CurrentFile.Length > 0) parts.Add(state.CurrentFile);
+
+        if (state.TotalBytes > 0)
+            parts.Add($"{DiskService.FormatBytes(state.ProcessedBytes)}/{DiskService.FormatBytes(state.TotalBytes)}");
+        if (state.SpeedBytesPerSec > 0) parts.Add($"{DiskService.FormatBytes(state.SpeedBytesPerSec)}/s");
+
+        return string.Join(" · ", parts);
     }
 
     private void HandleCompletion(string mode, bool auto, int? exitCode)
@@ -631,11 +1009,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         Logger.Info($"后台任务已结束 (模式={(string.Equals(mode, "clean", StringComparison.OrdinalIgnoreCase) ? "整理" : "检查")}, Auto={auto}, Exit={exitCode?.ToString() ?? "未知"})");
 
+        // exit=3：任务级互斥未拿到（已有另一个整理/预览任务在跑），本次没有执行
+        if (exitCode == 3)
+        {
+            StatusText = "空闲";
+            FooterHint = "已有另一个整理/预览任务正在运行，本次没有启动";
+            FinishProgress("已有另一个任务正在运行");
+            if (!auto)
+            {
+                NotificationRequested?.Invoke("AutoDefrag",
+                    "已有另一个整理/预览任务正在运行，本次没有启动", NotifyLevel.Warning);
+            }
+            OnPropertyChanged(nameof(NextRunText));
+            return;
+        }
+
         if (string.Equals(mode, "clean", StringComparison.OrdinalIgnoreCase))
         {
             RefreshLastResult();
             StatusText = ok ? "已完成" : "完成，部分未成功";
             FooterHint = ok ? "整理完成，结果已记录" : "整理结束，有磁盘没能完成，点“查看日志”可以看原因";
+            FinishProgress(ok ? "上次整理已完成" : "上次整理有磁盘未完成");
 
             var message = ok
                 ? (auto ? "今天的自动整理已完成" : "磁盘整理已完成")
@@ -647,6 +1041,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             RefreshDisks();
             StatusText = "空闲";
             FooterHint = "磁盘信息已更新";
+            FinishProgress("磁盘碎片检查完成");
         }
 
         OnPropertyChanged(nameof(NextRunText));
