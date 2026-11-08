@@ -67,7 +67,7 @@ public static class WorkerHost
 
             var code = isClean
                 ? DefragEngine.RunClean(drives, threshold, engine, 10, 10, minFrag)
-                : DefragEngine.RunStatus(drives);
+                : DefragEngine.RunStatus(drives, threshold, 10, 10);
 
             Logger.Info($"后台任务结束: exit={code}");
             return code;

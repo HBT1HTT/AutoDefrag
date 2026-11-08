@@ -137,7 +137,20 @@ public static class DefragEngine
                 continue;
             }
 
-            var preProbe = Probe(drive, volumeBytes);
+            // 预检同样是重 I/O：纳入 CPU 守护，命中阈值就挂起 defrag /A（阶段=预检）
+            var preProbe = Probe(drive, volumeBytes, cpuThreshold, highSeconds, lowSeconds, state, "预检");
+            if (preProbe.Stopped)
+            {
+                Logger.Warn($"{drive} 的 /A 预检被用户停止，本次整理提前结束");
+                results.Add(new DriveRunResult(drive, media, string.Empty, preProbe.ExitCode,
+                    preProbe.Suspended, preProbe.Resumed, DateTime.Now, DateTime.Now, "已停止", null, null, clusterBytes));
+                break;
+            }
+            if (preProbe.Suspended > 0 || preProbe.Resumed > 0)
+            {
+                Logger.Info($"{drive} /A 预检 CPU 守护: 暂停={preProbe.Suspended}次, 继续={preProbe.Resumed}次");
+            }
+
             var preFrag = preProbe.FragPercent;
             if (media == DiskMediaKind.Hdd && preFrag is null)
             {
@@ -156,7 +169,9 @@ public static class DefragEngine
             state.Message = $"正在{plan.Verb} {drive}（{DiskService.MediaText(media)}，第 {index + 1}/{targets.Count} 个磁盘）";
             state.Save();
 
-            var run = RunOneDrive(drive, plan, preFrag, cpuThreshold, highSeconds, lowSeconds, state);
+            // 预检已经发生的挂起/恢复作为基数带入整理阶段，worker_state.json 的口径始终是“本盘累计”
+            var run = RunOneDrive(drive, plan, preFrag, cpuThreshold, highSeconds, lowSeconds, state,
+                preProbe.Suspended, preProbe.Resumed);
 
             state.Stage = "分析碎片";
             state.Message = $"正在复核 {drive} 的碎片率";
@@ -165,11 +180,20 @@ public static class DefragEngine
             state.CurrentFile = string.Empty;
             state.SpeedBytesPerSec = 0;
             state.Save();
-            var postFrag = Probe(drive, volumeBytes).FragPercent;
+            // 复核同样跑 /A：继续沿用同一套守护，并把已累计的挂起/恢复次数作为基数
+            var postProbe = Probe(drive, volumeBytes, cpuThreshold, highSeconds, lowSeconds, state, "复核",
+                run.Suspended + preProbe.Suspended, run.Resumed + preProbe.Resumed);
+            if (postProbe.Suspended > 0 || postProbe.Resumed > 0)
+            {
+                Logger.Info($"{drive} /A 复核 CPU 守护: 暂停={postProbe.Suspended}次, 继续={postProbe.Resumed}次");
+            }
 
             results.Add(new DriveRunResult(
-                drive, media, plan.Arguments, run.ExitCode, run.Suspended, run.Resumed,
-                run.StartTime, run.EndTime, run.Status, preFrag, postFrag, clusterBytes));
+                drive, media, plan.Arguments, run.ExitCode,
+                run.Suspended + preProbe.Suspended + postProbe.Suspended,
+                run.Resumed + preProbe.Resumed + postProbe.Resumed,
+                run.StartTime, run.EndTime,
+                postProbe.Stopped ? "已停止" : run.Status, preFrag, postProbe.FragPercent, clusterBytes));
         }
 
         var okCount = results.Count(r => r.Status == "成功");
@@ -213,7 +237,7 @@ public static class DefragEngine
         return okCount == total ? 0 : 1;
     }
 
-    public static int RunStatus(string[] drives)
+    public static int RunStatus(string[] drives, int cpuThreshold = 70, int highSeconds = 10, int lowSeconds = 10)
     {
         var targets = drives.Length == 0
             ? FilterToFixed(Array.Empty<string>(), allowAllWhenEmpty: true)
@@ -240,6 +264,7 @@ public static class DefragEngine
         state.Save();
 
         var file = new DriveStatusFile { ProbeTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") };
+        var stopped = false;
         for (var index = 0; index < targets.Count; index++)
         {
             var drive = targets[index];
@@ -267,9 +292,16 @@ public static class DefragEngine
             }
             else
             {
-                var probe = Probe(drive, volumeBytes);
+                var probe = Probe(drive, volumeBytes, cpuThreshold, highSeconds, lowSeconds, state, "预检");
                 frag = probe.FragPercent;
                 probed = probe.FragPercent is not null;
+
+                if (probe.Stopped)
+                {
+                    Logger.Warn($"{drive} 的 /A 预检被用户停止，碎片检查提前结束");
+                    stopped = true;
+                    break;
+                }
 
                 // 一致性对比：同一卷上用自算口径再算一次，差异过大时写 WARN（两者统计对象不同，不要求相等）
                 var selfCheck = VolumeAnalyzer.Analyze(drive, RewriteOptions.Compare);
@@ -302,9 +334,9 @@ public static class DefragEngine
 
         state.Stage = "完成";
         state.Percent = -1;
-        state.Message = "碎片情况检查完成";
+        state.Message = stopped ? "碎片检查被用户停止" : "碎片情况检查完成";
         state.Save();
-        ProgressLog.Append("碎片检查完成");
+        ProgressLog.Append(stopped ? "碎片检查已停止" : "碎片检查完成");
 
         return 0;
     }
@@ -360,7 +392,7 @@ public static class DefragEngine
 
     private static DriveRunResult RunOneDrive(
         string drive, DefragPlan plan, double? preFrag, int cpuThreshold, int highSeconds, int lowSeconds,
-        WorkerStateFile state)
+        WorkerStateFile state, int suspendedBase = 0, int resumedBase = 0)
     {
         var startTime = DateTime.Now;
         var suspended = 0;
@@ -433,8 +465,8 @@ public static class DefragEngine
         var lowCount = 0;
         var stopped = false;
 
-        state.Suspended = 0;
-        state.Resumed = 0;
+        state.Suspended = suspendedBase;
+        state.Resumed = resumedBase;
         state.Message = $"正在{plan.Verb} {drive}";
         state.Save();
 
@@ -469,7 +501,7 @@ public static class DefragEngine
                         if (Native.TrySuspend(process.Id, out var error))
                         {
                             suspended++;
-                            state.Suspended = suspended;
+                            state.Suspended = suspendedBase + suspended;
                             state.Message = $"CPU 过高，已暂停 {drive} 的{plan.Verb}";
                             Logger.Warn($"CPU 连续 > {cpuThreshold}% 达 {highSeconds}s  ->  暂停整理程序 (PID={process.Id}, 当前CPU={cpu:N1}%)");
                         }
@@ -498,7 +530,7 @@ public static class DefragEngine
                         if (Native.TryResume(process.Id, out var error))
                         {
                             resumed++;
-                            state.Resumed = resumed;
+                            state.Resumed = resumedBase + resumed;
                             state.Message = $"正在{plan.Verb} {drive}";
                             Logger.Info($"CPU 回落并稳定 {lowSeconds}s  ->  继续整理程序 (PID={process.Id}, 当前CPU={cpu:N1}%)");
                         }
@@ -557,9 +589,14 @@ public static class DefragEngine
 
     /// <summary>
     /// 执行只读 defrag &lt;drive&gt; /A 并解析碎片率。
+    /// /A 也是重 I/O，因此与整理阶段同一套 CPU 守护：整机 CPU 每秒采样，
+    /// 连续 highSeconds 秒高于阈值就挂起这个 defrag 进程，回落到阈值以下并稳定 lowSeconds 秒后恢复；
+    /// 用户停止时先恢复再终止，避免留下挂起进程。
     /// 解析失败时把退出码与输出片段写进 engine.log，便于区分权限不足、超大簇限制或输出格式变化。
     /// </summary>
-    private static ProbeResult Probe(string drive, long volumeBytes)
+    private static ProbeResult Probe(
+        string drive, long volumeBytes, int cpuThreshold, int highSeconds, int lowSeconds,
+        WorkerStateFile state, string stage, int suspendedBase = 0, int resumedBase = 0)
     {
         var capture = new OutputCapture();
         try
@@ -588,7 +625,9 @@ public static class DefragEngine
             process.ErrorDataReceived += (_, e) => capture.Append(e.Data);
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
-            process.WaitForExit();
+
+            var guard = MonitorProbe(process, drive, stage, cpuThreshold, highSeconds, lowSeconds,
+                state, suspendedBase, resumedBase);
 
             int? exitCode = null;
             try { exitCode = process.ExitCode; } catch { }
@@ -606,13 +645,141 @@ public static class DefragEngine
                 Logger.Warn($"读取碎片情况时输出包含错误码 {errorCode}({drive}): exit={FormatExit(exitCode)}，但碎片仍解析为 {frag:0.##}%");
             }
 
-            return new ProbeResult(frag, exitCode, output);
+            return new ProbeResult(frag, exitCode, output, guard.Suspended, guard.Resumed, guard.Stopped);
         }
         catch (Exception ex)
         {
             Logger.Warn($"defrag /A 执行失败({drive}): {ex.Message}");
             return new ProbeResult(null, null, capture.Text);
         }
+    }
+
+    /// <summary>
+    /// /A 预检的 CPU 守护循环：语义与整理阶段一致（整机 CPU 每秒采样，
+    /// 连续 highSeconds 秒高于阈值就挂起 defrag 进程，回落到阈值以下并稳定 lowSeconds 秒后恢复）。
+    /// 返回本次预检自己的挂起/恢复次数；计数同时写入 worker_state.json。
+    /// </summary>
+    private static ProbeGuardOutcome MonitorProbe(
+        System.Diagnostics.Process process, string drive, string stage,
+        int cpuThreshold, int highSeconds, int lowSeconds, WorkerStateFile state,
+        int suspendedBase, int resumedBase)
+    {
+        var sampler = new SystemCpuSampler();
+        sampler.Sample();          // 预热：建立首个采样基准
+        Thread.Sleep(1000);
+
+        var suspended = 0;
+        var resumed = 0;
+        var phase = "Running";     // Running / Suspended
+        var highCount = 0;
+        var lowCount = 0;
+        var stopped = false;
+
+        state.Phase = stage;
+        state.Message = $"正在{stage} {drive} 的碎片率（/A）";
+        state.Suspended = suspendedBase;
+        state.Resumed = resumedBase;
+        state.Save();
+
+        while (!HasExited(process))
+        {
+            Thread.Sleep(1000);
+            if (HasExited(process)) break;
+
+            // 用户点“停止整理”：被挂起的预检进程必须先恢复再结束，避免留下挂起进程
+            if (File.Exists(AppPaths.StopFlagFile))
+            {
+                Logger.Warn($"检测到停止标记：正在结束 {drive} 的 /A {stage}进程");
+                if (phase == "Suspended")
+                {
+                    Native.TryResume(process.Id, out _);
+                }
+                try { process.Kill(entireProcessTree: true); } catch (Exception ex) { Logger.Warn("结束预检进程失败: " + ex.Message); }
+                stopped = true;
+                break;
+            }
+
+            var cpu = sampler.Sample();
+            state.CpuPercent = Math.Round(cpu, 1);
+
+            if (phase == "Running")
+            {
+                if (cpu > cpuThreshold)
+                {
+                    highCount++;
+                    if (highCount >= highSeconds)
+                    {
+                        if (Native.TrySuspend(process.Id, out var error))
+                        {
+                            suspended++;
+                            state.Suspended = suspendedBase + suspended;
+                            state.Message = $"CPU 过高，已暂停 {drive} 的{stage}（/A）";
+                            Logger.Warn($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] CPU 连续 > {cpuThreshold}% 达 {highSeconds}s -> " +
+                                        $"暂停 defrag {drive} /A（阶段={stage}, PID={process.Id}, 实测={cpu:N1}%, 阈值={cpuThreshold}%, 第 {suspended} 次）");
+                            ProgressLog.Append($"{drive} CPU {cpu:N1}% > {cpuThreshold}%（持续 {highSeconds}s），已暂停 /A {stage}（第 {suspended} 次）");
+                        }
+                        else
+                        {
+                            Logger.Warn($"暂停 /A {stage}进程失败: {error}");
+                        }
+
+                        phase = "Suspended";
+                        highCount = 0;
+                        lowCount = 0;
+                    }
+                }
+                else
+                {
+                    highCount = 0;
+                }
+            }
+            else
+            {
+                if (cpu <= cpuThreshold)
+                {
+                    lowCount++;
+                    if (lowCount >= lowSeconds)
+                    {
+                        if (Native.TryResume(process.Id, out var error))
+                        {
+                            resumed++;
+                            state.Resumed = resumedBase + resumed;
+                            state.Message = $"正在{stage} {drive} 的碎片率（/A）";
+                            Logger.Info($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] CPU 回落并稳定 {lowSeconds}s（实测={cpu:N1}% ≤ 阈值={cpuThreshold}%）-> " +
+                                        $"继续 defrag {drive} /A（阶段={stage}, PID={process.Id}, 第 {resumed} 次）");
+                            ProgressLog.Append($"{drive} CPU 回落到 {cpu:N1}%，继续 /A {stage}（第 {resumed} 次）");
+                        }
+                        else
+                        {
+                            Logger.Warn($"继续 /A {stage}进程失败: {error}");
+                        }
+
+                        phase = "Running";
+                        highCount = 0;
+                        lowCount = 0;
+                    }
+                }
+                else
+                {
+                    lowCount = 0;
+                }
+            }
+
+            state.Save();
+        }
+
+        // 防御性：若进程在挂起态下被外部结束，先恢复再收尾
+        if (phase == "Suspended")
+        {
+            Native.TryResume(process.Id, out _);
+        }
+
+        try { process.WaitForExit(); } catch { }
+
+        state.Phase = string.Empty;
+        state.Save();
+
+        return new ProbeGuardOutcome(suspended, resumed, stopped);
     }
 
     /// <summary>按输出证据与介质判定本次整理结果，不只依赖退出码。</summary>
@@ -886,7 +1053,11 @@ public static class DefragEngine
         }
     }
 
-    private sealed record ProbeResult(double? FragPercent, int? ExitCode, string Output);
+    private sealed record ProbeResult(
+        double? FragPercent, int? ExitCode, string Output,
+        int Suspended = 0, int Resumed = 0, bool Stopped = false);
+
+    private sealed record ProbeGuardOutcome(int Suspended, int Resumed, bool Stopped);
 }
 
 /// <summary>单个磁盘的参数计划：Arguments 不含盘符，CommandLine 为完整命令行（不含敏感信息）。</summary>

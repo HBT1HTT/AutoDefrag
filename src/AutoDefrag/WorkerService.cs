@@ -109,6 +109,11 @@ public sealed class WorkerService
             sb.Append(" --engine ").Append(EngineResolver.IsValid(engine) ? engine : "Self");
             sb.Append(" --minfrag ").Append(minFragmentPercent is >= 1 and <= 15 ? minFragmentPercent : 0);
         }
+        else
+        {
+            // 检查磁盘也要跑 defrag /A 预检，同样需要 CPU 守护阈值
+            sb.Append(" --threshold ").Append(Math.Clamp(threshold, 10, 100));
+        }
         return sb.ToString();
     }
 

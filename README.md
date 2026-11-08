@@ -2,9 +2,21 @@
 
 Windows 本地固定磁盘定期碎片整理工具的桌面版（WPF + .NET 10），单文件绿色版，目标机无需安装 .NET 运行时。
 
-- 版本：**v1.4.2**（正式版）
+- 版本：**v1.4.3**（正式版）
 - 发布形态：`win-x64` 自包含单文件（压缩），已嵌入图标
 - 可执行文件：`publish/AutoDefrag.exe`
+
+## 1.4.3 修复：系统 defrag 的 /A 预检纳入 CPU 守护
+
+- 1.4.2 只覆盖了本程序自己读写文件的阶段；“Windows 自带整理”路径里整理前/后的只读预检 `defrag <盘> /A`
+  仍不受守护。
+- 1.4.3 把 `/A` 预检接入同一套语义：整机 CPU 每秒采样，连续 10 秒高于阈值就**挂起该 defrag 进程**
+  （不是只写日志），回落到阈值以下并稳定 10 秒再恢复，恢复后继续等它跑完并正常解析输出。
+- 覆盖入口：界面“立即整理”“检查磁盘”、每日自动整理、`--worker clean`（含 `--minfrag`），以及整理后的
+  `/A` 复核；命令行 `--dry-run` 与托盘预览只分析大簇卷、不调用 `/A`，因此不涉及。
+- 挂起/恢复写日志（时间、实测 CPU、阈值、第几次、阶段=预检/复核），并计入 `worker_state.json` 与
+  `last_result.txt` 的暂停/继续次数；用户点“停止整理”时，被挂起的预检进程先恢复再终止。
+- 设置说明补一句“包括整理前和整理后的 /A 分析预检”。
 
 ## 1.4.2 修复：CPU 守护没有真正暂停
 
@@ -157,7 +169,7 @@ AutoDefrag.exe --worker status
 dotnet publish -c Release src/AutoDefrag/AutoDefrag.csproj -o publish -p:EnableCompressionInSingleFile=true
 ```
 
-版本号来自 `src/AutoDefrag/AutoDefrag.csproj`（当前 `1.4.2`）。产物为 `publish/AutoDefrag.exe` 单文件，自包含、已嵌入图标，无 trimming。
+版本号来自 `src/AutoDefrag/AutoDefrag.csproj`（当前 `1.4.3`）。产物为 `publish/AutoDefrag.exe` 单文件，自包含、已嵌入图标，无 trimming。
 
 ## 注意事项与风险
 
