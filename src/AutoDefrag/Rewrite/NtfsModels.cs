@@ -135,6 +135,9 @@ public sealed class RewriteOptions
     /// <summary>本轮采用的整理方式说明，仅用于报告展示（例如“自动 → 本程序整理（存储块 64KB）”）。</summary>
     public string EngineDecision { get; init; } = string.Empty;
 
+    /// <summary>可选 CPU 守护：分析/枚举阶段由它采样，命中暂停阈值时原地等待。</summary>
+    public CpuGuard? Guard { get; init; }
+
     public static RewriteOptions Default => new();
 
     public static RewriteOptions Quick => new()

@@ -252,7 +252,7 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0">
                                 <TextBlock Text="CPU 占用上限" FontSize="13.5" />
-                                <TextBlock Text="电脑 CPU 占用持续高于这个值时，整理会暂停；降下来后自动继续"
+                                <TextBlock Text="电脑整机 CPU 连续 10 秒高于这个值时，整理会暂停读写；回落到阈值以下并稳定 10 秒后自动继续（每秒采样）。阈值应高于平时的后台占用，否则会长时间暂停。保存后对下一次整理生效"
                                            Style="{StaticResource HintText}" />
                             </StackPanel>
                             <TextBlock Grid.Column="1" Text="{Binding CpuThresholdText}"

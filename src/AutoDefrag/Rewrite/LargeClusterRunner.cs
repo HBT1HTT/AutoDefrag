@@ -19,15 +19,49 @@ public static class LargeClusterRunner
         var minFrag = minFragmentPercent is >= 1 and <= 15 ? minFragmentPercent : 0;
 
         var decision = EngineResolver.Describe(engineMode, clusterBytes);
+
+        // CPU 守护覆盖全流程：分析/枚举、复制、校验、替换、复核。
+        // 命中阈值时 Check() 会原地阻塞，不再读写；回落并稳定后自动继续。
+        var guard = new CpuGuard(cpuThreshold, highSeconds, lowSeconds);
+        guard.Phase = "分析";
+        guard.StopRequested = () => File.Exists(AppPaths.StopFlagFile);
+
+        var lastCpuSave = DateTime.MinValue;
+        guard.OnSample = cpu =>
+        {
+            state.CpuPercent = cpu;
+            if ((DateTime.Now - lastCpuSave).TotalSeconds >= 1)
+            {
+                lastCpuSave = DateTime.Now;
+                state.Save();
+            }
+        };
+        guard.OnPause = (phase, cpu) =>
+        {
+            state.CpuPercent = cpu;
+            state.Suspended = guard.PausedCount;
+            state.Message = $"CPU {cpu:N1}% 高于阈值 {cpuThreshold}%（持续 {highSeconds}s），已暂停（{phase}）";
+            state.Save();
+            ProgressLog.Append($"{drive} CPU 过高：{cpu:N1}% > {cpuThreshold}%（持续 {highSeconds}s），暂停（{phase}）");
+        };
+        guard.OnResume = (phase, cpu) =>
+        {
+            state.CpuPercent = cpu;
+            state.Resumed = guard.ResumedCount;
+            state.Message = $"CPU 已回落（{cpu:N1}%），继续（{phase}）";
+            state.Save();
+            ProgressLog.Append($"{drive} CPU 回落：{cpu:N1}%，继续（{phase}）");
+        };
+
         var options = dryRun
             ? new RewriteOptions
             {
                 DryRun = true, ScanSeconds = 60, MaxScanFiles = 150_000, MaxExtentProbes = 12_000,
-                ScanRoot = scanRoot, MinFragmentationPercent = minFrag, EngineDecision = decision
+                ScanRoot = scanRoot, MinFragmentationPercent = minFrag, EngineDecision = decision, Guard = guard
             }
             : new RewriteOptions
             {
-                ScanRoot = scanRoot, MinFragmentationPercent = minFrag, EngineDecision = decision
+                ScanRoot = scanRoot, MinFragmentationPercent = minFrag, EngineDecision = decision, Guard = guard
             };
 
         state.Engine = EngineResolver.ShortName(EngineResolver.Effective(engineMode, clusterBytes));
@@ -45,7 +79,10 @@ public static class LargeClusterRunner
         Logger.Info($"================ {drive} 大簇卷整理开始（簇={clusterBytes} 字节, 模式={(dryRun ? "dry-run" : "真实整理")}" +
                     (scanRoot is null ? "，范围=整卷" : $"，范围={scanRoot}") +
                     $"，文件碎片率={(minFrag > 0 ? $"≥{minFrag}%" : "不限")}，整理方式={decision}） ================");
+        Logger.Info($"{drive} CPU 守护: 整机占用 > {cpuThreshold}% 连续 {highSeconds}s 暂停读写，" +
+                    $"≤ {cpuThreshold}% 稳定 {lowSeconds}s 继续（覆盖 分析/复制/校验/替换/复核，每秒采样）");
         ProgressLog.Append($"{drive} 大簇卷整理开始（{(dryRun ? "dry-run" : "真实整理")}）：{decision}");
+        ProgressLog.Append($"{drive} CPU 守护: > {cpuThreshold}% 连续 {highSeconds}s 暂停，回落稳定 {lowSeconds}s 继续");
 
         if (IsSystemVolume(drive))
         {
@@ -82,11 +119,10 @@ public static class LargeClusterRunner
             ProgressLog.Append($"{drive} 预览完成（未改动任何文件）");
             return BuildResult(drive, media, clusterBytes, dryRun, plan, null,
                 $"{drive} 预览完成：候选 {plan.Candidates.Count} 个，计划处理 {plan.Selected.Count} 个，未改动任何文件（{DiskService.FormatBytes(plan.PlannedBytes)}）",
-                "成功", startTime, fragBefore, null, path);
+                "成功", startTime, fragBefore, null, path, guard.PausedCount, guard.ResumedCount);
         }
 
         var summary = new RewriteSummary();
-        var guard = new CpuGuard(cpuThreshold, highSeconds, lowSeconds);
         var total = plan.Selected.Count;
         var totalBytes = Math.Max(0, plan.PlannedBytes);
         state.FileTotal = total;
@@ -109,6 +145,7 @@ public static class LargeClusterRunner
             }
 
             // 文件之间也检查一次 CPU，避免上一个文件把系统压满后立刻开始下一个
+            guard.Phase = "准备";
             guard.Check();
 
             var candidate = plan.Selected[i];
@@ -129,6 +166,7 @@ public static class LargeClusterRunner
             void OnPhase(string phase, long phaseBytes)
             {
                 state.Phase = phase;
+                guard.Phase = phase;
                 var current = doneBytes + Math.Min(Math.Max(0, phaseBytes), fileBytes);
                 state.ProcessedBytes = current;
                 if (totalBytes > 0)
@@ -172,6 +210,8 @@ public static class LargeClusterRunner
         state.CurrentFile = string.Empty;
         state.Save();
         ProgressLog.Append($"{drive} 全部文件处理完毕，开始复算碎片率");
+        guard.Phase = "复核";
+        guard.Check();
         var volumeAfter = VolumeAnalyzer.ReadVolumeLayout(drive, options);
         var fragAfter = ComputeResidualFragmentation(drive, plan, summary);
 
@@ -206,7 +246,8 @@ public static class LargeClusterRunner
             MaxExtentProbes = 12_000,
             MinFragmentationPercent = 0,
             MinFileClusters = 1,
-            ScanRoot = plan.Options.ScanRoot
+            ScanRoot = plan.Options.ScanRoot,
+            Guard = plan.Options.Guard
         });
 
         if (quick is not null) return quick.FileFragmentationPercent;

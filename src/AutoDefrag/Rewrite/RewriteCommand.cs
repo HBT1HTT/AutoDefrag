@@ -89,9 +89,11 @@ public static class RewriteCommand
         var config = new ConfigStore().Load(out _);
         var minFrag = config.FragThresholdEnabled ? config.FragThresholdPercent : 0;
         var engineMode = EngineResolver.IsValid(config.EngineMode) ? config.EngineMode : EngineResolver.Auto;
-        Logger.Info($"文件级整理参数: 文件碎片率={(minFrag > 0 ? $"≥{minFrag}%" : "不限")} 整理方式={EngineResolver.ModeText(engineMode)}");
+        var cpuThreshold = config.CpuThreshold;
+        Logger.Info($"文件级整理参数: 文件碎片率={(minFrag > 0 ? $"≥{minFrag}%" : "不限")} " +
+                    $"整理方式={EngineResolver.ModeText(engineMode)} CPU守护={cpuThreshold}%（连续10秒暂停/稳定10秒继续）");
         ProgressLog.Append($"开始{(dryRun ? "预览" : "文件级整理")}：目标={string.Join(",", drives)}；" +
-                           $"整理方式={EngineResolver.ModeText(engineMode)}");
+                           $"整理方式={EngineResolver.ModeText(engineMode)}；CPU守护={cpuThreshold}%");
 
         var lines = new List<string>();
         var failed = 0;
@@ -130,6 +132,7 @@ public static class RewriteCommand
             state.Save();
 
             var result = LargeClusterRunner.Run(letter, media, clusterBytes, state, dryRun, scanRoot,
+                cpuThreshold: cpuThreshold, highSeconds: 10, lowSeconds: 10,
                 minFragmentPercent: minFrag, engineMode: engineMode);
             if (result.Status == "失败") failed++;
             var fragText = dryRun

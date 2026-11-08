@@ -40,6 +40,7 @@ public static class VolumeAnalyzer
 
         var result = new AnalysisResult { Geometry = geometry, Volume = volume };
 
+        var guard = options.Guard;
         var deadline = DateTime.UtcNow.AddSeconds(Math.Max(options.ScanSeconds, 1));
         var minBytes = (long)Math.Max(options.MinFileClusters, 1) * geometry.ClusterBytes;
         var root = options.ScanRoot ?? drive;
@@ -50,6 +51,9 @@ public static class VolumeAnalyzer
         stack.Push(root);
         while (stack.Count > 0 && !stop)
         {
+            // 枚举/目录遍历也是重 I/O：每个目录前采样一次，命中阈值就原地等待
+            guard?.Check();
+
             var directory = stack.Pop();
             result.CountedDirectories++;
             IEnumerator<string>? enumerator = null;
@@ -91,6 +95,10 @@ public static class VolumeAnalyzer
 
                     var entry = enumerator.Current;
                     result.FilesScanned++;
+
+                    // 每 256 个条目采样一次，避免逐条 P/Invoke 的开销
+                    if (guard is not null && (result.FilesScanned & 0xFF) == 0)
+                        guard.Check();
 
                     // FileInfo.Attributes 在这个环境下对目录会抛 FileNotFound，目录判断改用 File.GetAttributes
                     FileAttributes attributes;

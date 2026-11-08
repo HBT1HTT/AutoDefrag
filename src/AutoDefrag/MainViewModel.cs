@@ -765,7 +765,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         StatusText = auto ? "自动整理中" : "正在整理";
         FooterHint = $"正在整理 {string.Join("、", drives)}（{EngineModeText}）· " +
                      (_config.FragThresholdEnabled ? $"仅整理碎片率 ≥ {_config.FragThresholdPercent}% 的文件 · " : "全部整理 · ") +
-                     $"CPU 占用超过 {_config.CpuThreshold}% 时会自动暂停";
+                     $"CPU 连续 10 秒高于 {_config.CpuThreshold}% 时暂停，回落后自动继续";
         BeginProgress($"正在准备整理 {string.Join("、", drives)}");
     }
 

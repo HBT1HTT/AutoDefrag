@@ -25,6 +25,7 @@ public static class RewriteExecutor
         var geometry = plan.Geometry;
 
         onPhase?.Invoke("预检", 0);
+        guard?.Check();
         var beforeLayout = TryReadLayout(path, out var beforeExtents);
         if (beforeLayout is null)
         {
@@ -191,6 +192,12 @@ public static class RewriteExecutor
             }
 
             // -------------------------------------------------- 7. 替换后复核
+            if (guard is not null)
+            {
+                guard.Phase = "复核";
+                guard.Check();
+            }
+
             if (!NtfsNative.TryGetExtents(path, out var afterExtents, out var afterError))
             {
                 Logger.Warn($"[重写] {path} 替换后读取区段失败: {afterError}，尝试用备份恢复");
