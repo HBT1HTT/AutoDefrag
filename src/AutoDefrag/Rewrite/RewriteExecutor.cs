@@ -12,11 +12,14 @@ namespace AutoDefrag.Rewrite;
 /// </summary>
 public static class RewriteExecutor
 {
-    /// <summary>全量哈希的字节上限（2GiB）；超过则按首/中/尾抽样。</summary>
+    /// <summary>全量哈希的字节上限（2GiB）；Auto 模式下超过则按首/中/尾抽样。</summary>
     private const long FullHashLimitBytes = 2L * 1024 * 1024 * 1024;
 
+    /// <summary>复制/校验缓冲区大小（4MiB）。顺序大块 I/O 比 1MiB 略快，且不改变单次分配策略。</summary>
+    private const int BufferBytes = 4 * 1024 * 1024;
+
     /// <summary>抽样时每段的字节数。</summary>
-    private const int SampleChunkBytes = 4 * 1024 * 1024;
+    private const int SampleChunkBytes = BufferBytes;
 
     public static RewriteFileResult Execute(
         string path, RewritePlan plan, CpuGuard? guard = null, Action<string, long>? onPhase = null)
@@ -72,7 +75,15 @@ public static class RewriteExecutor
         var tempPath = Path.Combine(directory, $".{name}.adf-tmp-{token}");
         var backupPath = Path.Combine(directory, $".{name}.adf-bak-{token}");
 
-        var hashMode = fileInfo.Length <= FullHashLimitBytes ? "全量SHA256" : "抽样SHA256(首/中/尾)";
+        // 校验档位跟随整理质量预设：Full 总是全量；Sample 总是首/中/尾抽样；
+        // Auto 在 ≤2GiB 时全量、超过时抽样。任何档位都不会“完全不校验”。
+        var fullHash = plan.Options.VerifyMode switch
+        {
+            "Full" => true,
+            "Sample" => false,
+            _ => fileInfo.Length <= FullHashLimitBytes
+        };
+        var hashMode = fullHash ? "全量SHA256" : "抽样SHA256(首/中/尾)";
         var result = new RewriteFileResult
         {
             Path = path,
@@ -90,7 +101,7 @@ public static class RewriteExecutor
         {
             // -------------------------------------------------- 3. 复制到临时文件
             onPhase?.Invoke("复制", 0);
-            originalHash = CopyWithHash(path, tempPath, fileInfo.Length, guard, onPhase);
+            originalHash = CopyWithHash(path, tempPath, fileInfo.Length, fullHash, guard, onPhase);
             Logger.Info($"[重写] 复制完成 {path} -> 临时文件，原始哈希={Convert.ToHexString(originalHash)[..16]}…");
         }
         catch (Exception ex)
@@ -112,7 +123,7 @@ public static class RewriteExecutor
             }
 
             onPhase?.Invoke("校验", 0);
-            var copiedHash = ComputeHash(tempPath, fileInfo.Length, guard, onPhase);
+            var copiedHash = ComputeHash(tempPath, fileInfo.Length, fullHash, guard, onPhase);
             if (!AreEqual(originalHash, copiedHash))
             {
                 Cleanup(tempPath, backupPath);
@@ -256,22 +267,28 @@ public static class RewriteExecutor
 
     // ---------------------------------------------------------------- 复制与校验
 
-    /// <summary>顺序复制主数据流，同时计算原始文件的哈希；每 32MB 检查一次 CPU 守护。</summary>
+    /// <summary>
+    /// 顺序复制主数据流，同时计算原始文件的哈希；每 32MB 检查一次 CPU 守护。
+    /// fullHash=true 时算全量 SHA256；false 时只对首/中/尾同样的区间取样，
+    /// 必须与 ComputeHash 的口径完全一致，否则大文件会出现“哈希校验不一致”。
+    /// </summary>
     private static byte[] CopyWithHash(
-        string source, string target, long length, CpuGuard? guard, Action<string, long>? onPhase)
+        string source, string target, long length, bool fullHash, CpuGuard? guard, Action<string, long>? onPhase)
     {
         // 源文件用 FileShare.Read 打开：复制期间其他进程只能读，不能改/删，保证哈希与内容对应
         using var input = new FileStream(source, FileMode.Open, FileAccess.Read,
-            FileShare.Read, 1 << 20, FileOptions.SequentialScan);
+            FileShare.Read, BufferBytes, FileOptions.SequentialScan);
         using var output = new FileStream(target, FileMode.CreateNew, FileAccess.Write,
-            FileShare.None, 1 << 20, FileOptions.SequentialScan);
+            FileShare.None, BufferBytes, FileOptions.SequentialScan);
 
         // 一次性预分配全部长度：让 NTFS 用单次分配请求挑选足够大的连续空闲区。
-        // 如果按 1MB 边写边分配，分配器会为每个小块单独挑洞，反而把文件写得更碎。
+        // 如果边写边分配，分配器会为每个小块单独挑洞，反而把文件写得更碎。
         output.SetLength(length);
 
+        var segments = fullHash ? Array.Empty<(long Offset, int Length)>() : SampleSegments(length);
+
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var buffer = new byte[1 << 20];
+        var buffer = new byte[BufferBytes];
         long copied = 0;
         var sinceCheck = 0;
         while (copied < length)
@@ -280,7 +297,23 @@ public static class RewriteExecutor
             var read = input.Read(buffer, 0, want);
             if (read <= 0) break;
             output.Write(buffer, 0, read);
-            hash.AppendData(buffer, 0, read);
+
+            if (fullHash)
+            {
+                hash.AppendData(buffer, 0, read);
+            }
+            else
+            {
+                // 只对与抽样区间重叠的部分做哈希
+                foreach (var segment in segments)
+                {
+                    var from = Math.Max(copied, segment.Offset);
+                    var to = Math.Min(copied + read, segment.Offset + segment.Length);
+                    if (to > from)
+                        hash.AppendData(buffer, (int)(from - copied), (int)(to - from));
+                }
+            }
+
             copied += read;
             onPhase?.Invoke("复制", copied);
 
@@ -296,18 +329,37 @@ public static class RewriteExecutor
         return hash.GetHashAndReset();
     }
 
-    /// <summary>计算目标文件的哈希：小文件全量，大文件首/中/尾抽样。</summary>
+    /// <summary>抽样区间：首、中、尾各最多 4MB，按偏移去重（小文件自动退化为整文件）。</summary>
+    private static (long Offset, int Length)[] SampleSegments(long length)
+    {
+        if (length <= 0) return Array.Empty<(long, int)>();
+        var offsets = new[]
+        {
+            0L,
+            Math.Max(0, length / 2 - SampleChunkBytes / 2),
+            Math.Max(0, length - SampleChunkBytes)
+        };
+
+        var list = new List<(long, int)>();
+        foreach (var offset in offsets.Distinct().OrderBy(x => x))
+        {
+            var segmentLength = (int)Math.Min(SampleChunkBytes, length - offset);
+            if (segmentLength > 0) list.Add((offset, segmentLength));
+        }
+        return list.ToArray();
+    }
+
+    /// <summary>计算目标文件的哈希：口径与复制时一致（全量或首/中/尾抽样）。</summary>
     private static byte[] ComputeHash(
-        string path, long length, CpuGuard? guard, Action<string, long>? onPhase = null)
+        string path, long length, bool fullHash, CpuGuard? guard, Action<string, long>? onPhase = null)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
-            FileShare.Read, 1 << 20, FileOptions.SequentialScan);
+            FileShare.Read, BufferBytes, FileOptions.SequentialScan);
 
-        // 全量用 1MB 分块，便于插入 CPU 守护检查
-        if (length <= FullHashLimitBytes)
+        using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        if (fullHash)
         {
-            using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            var buffer = new byte[1 << 20];
+            var buffer = new byte[BufferBytes];
             long readBytes = 0;
             var sinceCheck = 0;
             while (readBytes < length)
@@ -330,13 +382,11 @@ public static class RewriteExecutor
             return sha.GetHashAndReset();
         }
 
-        using var sample = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var chunk = new byte[SampleChunkBytes];
-        var offsets = new[] { 0L, Math.Max(0, length / 2 - SampleChunkBytes / 2), Math.Max(0, length - SampleChunkBytes) };
-        foreach (var offset in offsets.Distinct())
+        foreach (var segment in SampleSegments(length))
         {
-            stream.Position = offset;
-            var remaining = (int)Math.Min(SampleChunkBytes, length - offset);
+            stream.Position = segment.Offset;
+            var remaining = segment.Length;
             var read = 0;
             while (read < remaining)
             {
@@ -344,11 +394,11 @@ public static class RewriteExecutor
                 if (got <= 0) break;
                 read += got;
             }
-            sample.AppendData(chunk, 0, read);
+            sha.AppendData(chunk, 0, read);
             guard?.Check();
         }
 
-        return sample.GetHashAndReset();
+        return sha.GetHashAndReset();
     }
 
     private static bool AreEqual(byte[]? a, byte[]? b)

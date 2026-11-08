@@ -9,6 +9,8 @@ namespace AutoDefrag;
 /// </summary>
 public static class Logger
 {
+    private const long MaxBytes = 2 * 1024 * 1024; // 单文件上限 2 MB，保留 1 个 .1 备份
+
     private static readonly object Gate = new();
     private static readonly UTF8Encoding Utf8NoBom = new(false);
     private static string _source = "app";
@@ -31,12 +33,31 @@ public static class Logger
             var line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{level}] [{_source}] {message}{Environment.NewLine}";
             lock (Gate)
             {
+                RotateIfNeeded(file);
                 File.AppendAllText(file, line, Utf8NoBom);
             }
         }
         catch
         {
             // 日志永不应该影响主流程
+        }
+    }
+
+    /// <summary>日志轮转：超过上限时把当前文件改名为 .1（覆盖旧备份），避免日志无限增长。</summary>
+    private static void RotateIfNeeded(string file)
+    {
+        try
+        {
+            var info = new FileInfo(file);
+            if (!info.Exists || info.Length < MaxBytes) return;
+
+            var backup = file + ".1";
+            if (File.Exists(backup)) File.Delete(backup);
+            File.Move(file, backup);
+        }
+        catch
+        {
+            // 轮转失败时保持原文件继续追加，不能因此丢掉日志
         }
     }
 

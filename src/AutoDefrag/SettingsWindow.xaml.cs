@@ -33,6 +33,21 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
     private string _fragThresholdText;
     private bool _fragThresholdInvalid;
 
+    // 整理设置草稿：三档预设 + P1/P2 参数。改动任意一项都会重新判定档位，不覆盖用户的输入。
+    private string _quality = DefragQualityPresets.Balanced;
+    private string _minFileSizeText = "32";
+    private string _maxFilesText = "80";
+    private string _maxBytesText = "16";
+    private string _minReclaimText = "4";
+    private int _verifyIndex;
+    private string _maxRoundsText = "3";
+    private string _maxMinutesText = "120";
+    private bool _ssdOptimizeOnly = true;
+    private bool _defragInvalid;
+    private bool _applyingPreset;
+    // 用户显式点过「自定义」：未改动参数前保持自定义，即使数值恰好等于某档也不自动认回
+    private bool _explicitCustom;
+
     public SettingsWindow(MainViewModel viewModel)
     {
         InitializeComponent();
@@ -49,6 +64,21 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         _engineMode = _vm.EngineMode;
         _fragThresholdEnabled = _vm.FragThresholdEnabled;
         _fragThresholdText = _vm.FragThresholdPercent.ToString();
+
+        var prefs = _vm.DefragPreferences;
+        // 保存过“自定义”的配置：即使数值恰好与某档一致，也要如实显示自定义
+        _explicitCustom = prefs.Quality == DefragQualityPresets.Custom;
+        _quality = _explicitCustom
+            ? DefragQualityPresets.Custom
+            : DefragQualityPresets.Match(prefs)?.Key ?? DefragQualityPresets.Custom;
+        _minFileSizeText = prefs.MinFileSizeKB.ToString();
+        _maxFilesText = prefs.MaxFilesPerRun.ToString();
+        _maxBytesText = prefs.MaxBytesPerRunGB.ToString();
+        _minReclaimText = prefs.MinReclaimMB.ToString();
+        _verifyIndex = VerifyIndexFromMode(prefs.VerifyMode);
+        _maxRoundsText = prefs.MaxRounds.ToString();
+        _maxMinutesText = prefs.MaxRunMinutes.ToString();
+        _ssdOptimizeOnly = prefs.SsdOptimizeOnly;
 
         DataContext = this;
 
@@ -79,6 +109,23 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
                 break;
             default:
                 EngineSelf.IsChecked = true;
+                break;
+        }
+
+        // 档位由当前参数是否与预设完全一致推导：自定义时不选中任何一档。
+        switch (_quality)
+        {
+            case DefragQualityPresets.Fast:
+                QualityFast.IsChecked = true;
+                break;
+            case DefragQualityPresets.Balanced:
+                QualityBalanced.IsChecked = true;
+                break;
+            case DefragQualityPresets.Thorough:
+                QualityThorough.IsChecked = true;
+                break;
+            case DefragQualityPresets.Custom:
+                QualityCustom.IsChecked = true;
                 break;
         }
 
@@ -116,7 +163,17 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         set
         {
             if (!SetField(ref _engineMode, value)) return;
+            if (_engineMode != "Self")
+            {
+                // 切到自动/系统整理后参数整组禁用，之前留在输入框里的非法值不再阻止保存
+                SetFragThresholdInvalid(false);
+                SetDefragInvalid(false);
+            }
             OnPropertyChanged(nameof(EngineHint));
+            OnPropertyChanged(nameof(DefragSettingsEnabled));
+            OnPropertyChanged(nameof(DefragGateHint));
+            OnPropertyChanged(nameof(DefragGateVisibility));
+            OnPropertyChanged(nameof(DefragGateTitle));
         }
     }
 
@@ -185,7 +242,125 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
     public Visibility TimeErrorVisibility =>
         _timeInvalid ? Visibility.Visible : Visibility.Collapsed;
 
-    // ---------------------------------------------------------------- 整理范围
+    // ---------------------------------------------------------------- 整理设置
+
+    /// <summary>只有“本程序整理”时整组可编辑；System / Auto 置灰但保留已保存的值。</summary>
+    public bool DefragSettingsEnabled => _engineMode == "Self";
+
+    public Visibility DefragGateVisibility =>
+        DefragSettingsEnabled ? Visibility.Collapsed : Visibility.Visible;
+
+    public string DefragGateTitle => _engineMode == "Self"
+        ? string.Empty
+        : "整理质量暂不可调";
+
+    public string DefragGateHint => _engineMode switch
+    {
+        "System" => "当前选择「Windows 自带整理」，系统 defrag 不读取这些参数，所以整组不可编辑；已保存的值会保留，切回「本程序整理」后可继续使用。",
+        "Auto" => "当前是「自动」：按磁盘存储块大小选择引擎，只有大簇盘会用内置引擎，小簇盘仍走 Windows 自带整理，所以整组不可编辑；已保存的值会保留，点右侧按钮切到「本程序整理」后即可编辑。",
+        _ => "可编辑。文件级重写只在大于 4KB 存储块的磁盘上执行，参数在下次整理开始时读取，不影响正在进行的任务。"
+    };
+
+    public Visibility QualityCustomVisibility =>
+        _quality == DefragQualityPresets.Custom ? Visibility.Visible : Visibility.Collapsed;
+
+    public string QualitySummary => _quality switch
+    {
+        DefragQualityPresets.Fast =>
+            "最快：只处理碎片率 ≥10%、≥256KB、单文件可回收 ≥16MB 的文件；单轮 20 文件/4GB、1 轮、抽样校验。耗时最短，效果一般但不会倒退。",
+        DefragQualityPresets.Thorough =>
+            "最彻底：≥4KB、单文件可回收 ≥1MB；单轮 300 文件/32GB、最多 8 轮、全量校验。尽量少碎片，耗时最长，建议空闲时使用。",
+        DefragQualityPresets.Custom =>
+            "自定义：保留当前数值，按下面填写的值执行；改回与某档一致时会自动认回该档，也可直接点上面任一档重新套用。",
+        _ =>
+            "均衡：默认。≥32KB、单文件可回收 ≥4MB；单轮 80 文件/16GB、最多 3 轮、自动校验（≤2GB 全量，超过抽样）。覆盖与耗时折中。"
+    };
+
+    public string MinFileSizeText
+    {
+        get => _minFileSizeText;
+        set
+        {
+            if (!SetField(ref _minFileSizeText, value)) return;
+            if (_defragInvalid) SetDefragInvalid(false);
+            MarkDefragEdited();
+        }
+    }
+
+    public string MaxFilesText
+    {
+        get => _maxFilesText;
+        set
+        {
+            if (!SetField(ref _maxFilesText, value)) return;
+            if (_defragInvalid) SetDefragInvalid(false);
+            MarkDefragEdited();
+        }
+    }
+
+    public string MaxBytesText
+    {
+        get => _maxBytesText;
+        set
+        {
+            if (!SetField(ref _maxBytesText, value)) return;
+            if (_defragInvalid) SetDefragInvalid(false);
+            MarkDefragEdited();
+        }
+    }
+
+    public string MinReclaimText
+    {
+        get => _minReclaimText;
+        set
+        {
+            if (!SetField(ref _minReclaimText, value)) return;
+            if (_defragInvalid) SetDefragInvalid(false);
+            MarkDefragEdited();
+        }
+    }
+
+    public int VerifyIndex
+    {
+        get => _verifyIndex;
+        set
+        {
+            if (!SetField(ref _verifyIndex, value)) return;
+            MarkDefragEdited();
+        }
+    }
+
+    public string MaxRoundsText
+    {
+        get => _maxRoundsText;
+        set
+        {
+            if (!SetField(ref _maxRoundsText, value)) return;
+            if (_defragInvalid) SetDefragInvalid(false);
+            MarkDefragEdited();
+        }
+    }
+
+    public string MaxMinutesText
+    {
+        get => _maxMinutesText;
+        set
+        {
+            if (!SetField(ref _maxMinutesText, value)) return;
+            if (_defragInvalid) SetDefragInvalid(false);
+            MarkDefragEdited();
+        }
+    }
+
+    /// <summary>固态优化开关独立于三档预设，改动不会把档位变成自定义。</summary>
+    public bool SsdOptimizeOnly
+    {
+        get => _ssdOptimizeOnly;
+        set => SetField(ref _ssdOptimizeOnly, value);
+    }
+
+    public Visibility DefragErrorVisibility =>
+        _defragInvalid ? Visibility.Visible : Visibility.Collapsed;
 
     public bool FragThresholdEnabled
     {
@@ -194,6 +369,7 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         {
             if (!SetField(ref _fragThresholdEnabled, value)) return;
             OnPropertyChanged(nameof(FragThresholdVisibility));
+            MarkDefragEdited();
         }
     }
 
@@ -207,6 +383,7 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         {
             if (!SetField(ref _fragThresholdText, value)) return;
             if (_fragThresholdInvalid) SetFragThresholdInvalid(false);
+            MarkDefragEdited();
         }
     }
 
@@ -229,41 +406,172 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
             EngineMode = tag;
     }
 
-    // ------------------------------------------------------- 阈值输入框过滤
-
-    /// <summary>
-    /// 输入阶段只放行 0–9 的单个字符，并且保证输入后总长度不超过 2 位（最大值 15）；
-    /// 0、16 这类两位以内的数字可以先显示出来，保存时再按 1–15 拒绝并提示。
-    /// </summary>
-    private void FragThreshold_PreviewTextInput(object sender, TextCompositionEventArgs e)
+    private void Quality_Checked(object sender, RoutedEventArgs e)
     {
-        var box = (TextBox)sender;
-        e.Handled = !AcceptsDigitInput(e.Text, box.Text, box.SelectionStart, box.SelectionLength);
+        if (!IsLoaded || _applyingPreset) return;
+        if ((sender as FrameworkElement)?.Tag is not string tag) return;
+
+        if (tag == DefragQualityPresets.Custom)
+        {
+            // 选择“自定义”只解锁（本组在 Self 下本就全可编辑），不重置现有数值
+            _explicitCustom = true;
+            SetQuality(DefragQualityPresets.Custom);
+            return;
+        }
+
+        _explicitCustom = false;
+        ApplyPreset(tag);
     }
 
-    /// <summary>只接受 ASCII 数字，且输入后总长度不超过 2 位（最大值 15）。</summary>
-    private static bool AcceptsDigitInput(string input, string current, int selectionStart, int selectionLength)
+    private void UseSelfEngine_Click(object sender, RoutedEventArgs e)
+    {
+        // 门控提示里的快捷入口：切换到「本程序整理」后立即可调（仍需点“保存”才落盘）
+        EngineSelf.IsChecked = true;
+        if (!IsLoaded) EngineMode = "Self";
+    }
+
+    /// <summary>整组套用某一档参数；不会改动“固态只优化”（它独立于三档）。</summary>
+    private void ApplyPreset(string key)
+    {
+        if (!DefragQualityPresets.IsValid(key) || key == DefragQualityPresets.Custom)
+            return;
+
+        var preset = DefragQualityPresets.Get(key);
+        _explicitCustom = false;
+        _applyingPreset = true;
+        try
+        {
+            MinFileSizeText = preset.MinFileSizeKB.ToString();
+            MaxFilesText = preset.MaxFilesPerRun.ToString();
+            MaxBytesText = preset.MaxBytesPerRunGB.ToString();
+            MinReclaimText = preset.MinReclaimMB.ToString();
+            VerifyIndex = VerifyIndexFromMode(preset.VerifyMode);
+            MaxRoundsText = preset.MaxRounds.ToString();
+            MaxMinutesText = preset.MaxRunMinutes.ToString();
+            FragThresholdEnabled = preset.FragThresholdEnabled;
+            FragThresholdText = preset.FragThresholdPercent.ToString();
+            SetQuality(preset.Key);
+        }
+        finally
+        {
+            _applyingPreset = false;
+        }
+
+        SetFragThresholdInvalid(false);
+        SetDefragInvalid(false);
+    }
+
+    /// <summary>手动改动任意一项后重新判定档位；与某档完全一致就显示该档，否则显示“自定义”。</summary>
+    private void MarkDefragEdited()
+    {
+        if (_applyingPreset) return;
+        // 显式“自定义”只在用户真正改动参数后才参与自动认档
+        _explicitCustom = false;
+        SetQuality(DefragQualityPresets.Match(BuildPreferences())?.Key ?? DefragQualityPresets.Custom);
+    }
+
+    private void SetQuality(string key)
+    {
+        if (_quality == key) return;
+        _quality = key;
+        OnPropertyChanged(nameof(QualitySummary));
+        OnPropertyChanged(nameof(QualityCustomVisibility));
+
+        // 自定义时三个档位都不选中；参数与某档完全一致时把该档重新选中，
+        // 避免“把数值改回预设后摘要显示某档、但没有任何单选被选中”的状态。
+        _applyingPreset = true;
+        try
+        {
+            if (key == DefragQualityPresets.Custom)
+            {
+                QualityFast.IsChecked = false;
+                QualityBalanced.IsChecked = false;
+                QualityThorough.IsChecked = false;
+                QualityCustom.IsChecked = true;
+            }
+            else
+            {
+                QualityFast.IsChecked = key == DefragQualityPresets.Fast;
+                QualityBalanced.IsChecked = key == DefragQualityPresets.Balanced;
+                QualityThorough.IsChecked = key == DefragQualityPresets.Thorough;
+                QualityCustom.IsChecked = false;
+            }
+        }
+        finally
+        {
+            _applyingPreset = false;
+        }
+    }
+
+    /// <summary>把当前草稿转成快照；非法/空输入先按默认值代入，仅用于判定档位。</summary>
+    private DefragPreferences BuildPreferences()
+    {
+        return new DefragPreferences(
+            _quality,
+            _fragThresholdEnabled,
+            ParseOrDefault(_fragThresholdText, 10),
+            ParseOrDefault(_minFileSizeText, 32),
+            ParseOrDefault(_maxFilesText, 80),
+            ParseOrDefault(_maxBytesText, 16),
+            ParseOrDefault(_minReclaimText, 4),
+            VerifyModeFromIndex(_verifyIndex),
+            ParseOrDefault(_maxRoundsText, 3),
+            ParseOrDefault(_maxMinutesText, 120),
+            _ssdOptimizeOnly).Normalized();
+    }
+
+    private static int ParseOrDefault(string? text, int fallback) =>
+        int.TryParse((text ?? string.Empty).Trim(), out var value) ? value : fallback;
+
+    private static int VerifyIndexFromMode(string? mode) => mode switch
+    {
+        "Full" => 1,
+        "Sample" => 2,
+        _ => 0
+    };
+
+    private static string VerifyModeFromIndex(int index) => index switch
+    {
+        1 => "Full",
+        2 => "Sample",
+        _ => "Auto"
+    };
+
+    // ------------------------------------------------------- 阈值输入框过滤
+
+    /// <summary>数字框只放行 0–9；最大长度由每个输入框的 Tag 指定（碎片率=2、文件数=3、大小=4…）。</summary>
+    private void Number_PreviewTextInput(object sender, TextCompositionEventArgs e)
+    {
+        var box = (TextBox)sender;
+        e.Handled = !AcceptsDigitInput(e.Text, box.Text, box.SelectionStart, box.SelectionLength, MaxDigits(box));
+    }
+
+    private static int MaxDigits(TextBox box) =>
+        int.TryParse(box.Tag?.ToString(), out var max) && max > 0 ? max : 4;
+
+    /// <summary>只接受 ASCII 数字，且输入后总长度不超过 maxDigits。</summary>
+    private static bool AcceptsDigitInput(string input, string current, int selectionStart, int selectionLength, int maxDigits)
     {
         if (!IsAsciiDigits(input)) return false;
         var proposed = current.Remove(selectionStart, selectionLength).Insert(selectionStart, input);
-        return proposed.Length <= 2;
+        return proposed.Length <= maxDigits;
     }
 
     /// <summary>空格不会进入数字框；退格、删除、方向键、Home/End、Tab、Ctrl 组合键都保持可用。</summary>
-    private void FragThreshold_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    private void Number_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         if (e.Key == Key.Space) e.Handled = true;
     }
 
-    /// <summary>粘贴只保留 ASCII 数字；全是字母/符号/中文时不插入内容，且最多保留 2 位。</summary>
-    private void FragThreshold_Pasting(object sender, DataObjectPastingEventArgs e)
+    /// <summary>粘贴只保留 ASCII 数字；全是字母/符号/中文时不插入内容，且不超过输入框最大长度。</summary>
+    private void Number_Pasting(object sender, DataObjectPastingEventArgs e)
     {
         var box = (TextBox)sender;
         var raw = e.DataObject.GetData(System.Windows.DataFormats.UnicodeText) as string
                   ?? e.DataObject.GetData(System.Windows.DataFormats.Text) as string
                   ?? string.Empty;
 
-        var available = 2 - (box.Text.Length - box.SelectionLength);
+        var available = MaxDigits(box) - (box.Text.Length - box.SelectionLength);
         var digits = FilterPastedDigits(raw, available);
         if (digits.Length == 0)
         {
@@ -305,16 +613,52 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
             }
         }
 
-        var fragPercent = 0;
-        if (_fragThresholdEnabled)
+        DefragPreferences defrag;
+        if (!DefragSettingsEnabled)
         {
-            fragPercent = ParseFragThreshold(_fragThresholdText);
-            if (fragPercent is < 1 or > 15)
+            // 整理参数整组不可编辑（自动/Windows 自带）：沿用已保存的值，
+            // 不能因为禁用面板里残留的旧输入把“保存”卡住。
+            SetFragThresholdInvalid(false);
+            SetDefragInvalid(false);
+            defrag = _vm.DefragPreferences;
+        }
+        else
+        {
+            var fragPercent = 0;
+            if (_fragThresholdEnabled)
             {
-                // 超出范围直接拒绝保存并提示，不静默截断
-                SetFragThresholdInvalid(true);
+                fragPercent = ParseFragThreshold(_fragThresholdText);
+                if (fragPercent is < 1 or > 15)
+                {
+                    // 超出范围直接拒绝保存并提示，不静默截断
+                    SetFragThresholdInvalid(true);
+                    return;
+                }
+            }
+            else
+            {
+                // 关闭阈值时保留已保存的百分比，避免用户下次打开时值被重置
+                fragPercent = _vm.FragThresholdPercent;
+            }
+
+            var minFile = ParseOrDefault(_minFileSizeText, -1);
+            var maxFiles = ParseOrDefault(_maxFilesText, -1);
+            var maxBytes = ParseOrDefault(_maxBytesText, -1);
+            var minReclaim = ParseOrDefault(_minReclaimText, -1);
+            var maxRounds = ParseOrDefault(_maxRoundsText, -1);
+            var maxMinutes = ParseOrDefault(_maxMinutesText, -1);
+            if (minFile is < 4 or > 4096 || maxFiles is < 10 or > 500 || maxBytes is < 1 or > 64 ||
+                minReclaim is < 0 or > 64 || maxRounds is < 1 or > 10 || maxMinutes is < 0 or > 1440)
+            {
+                SetDefragInvalid(true);
                 return;
             }
+
+            SetDefragInvalid(false);
+            defrag = new DefragPreferences(
+                _quality, _fragThresholdEnabled, fragPercent,
+                minFile, maxFiles, maxBytes, minReclaim,
+                VerifyModeFromIndex(_verifyIndex), maxRounds, maxMinutes, _ssdOptimizeOnly).Normalized();
         }
 
         // 调度：先处理“启动后立即执行”，再写入具体时间，两种切换都不会丢用户输入。
@@ -335,8 +679,7 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         _vm.SelectedFont = _selectedFont;
         _vm.SetTheme(_themeMode);
         _vm.EngineMode = _engineMode;
-        _vm.FragThresholdEnabled = _fragThresholdEnabled;
-        if (_fragThresholdEnabled) _vm.FragThresholdPercent = fragPercent;
+        _vm.ApplyDefragSettings(defrag);
 
         Close();
     }
@@ -355,6 +698,13 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         if (_fragThresholdInvalid == invalid) return;
         _fragThresholdInvalid = invalid;
         OnPropertyChanged(nameof(FragThresholdErrorVisibility));
+    }
+
+    private void SetDefragInvalid(bool invalid)
+    {
+        if (_defragInvalid == invalid) return;
+        _defragInvalid = invalid;
+        OnPropertyChanged(nameof(DefragErrorVisibility));
     }
 
     /// <summary>解析阈值输入；非数字或越界时返回 0，由调用方判定为无效。</summary>

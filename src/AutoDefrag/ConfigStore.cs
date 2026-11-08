@@ -31,13 +31,22 @@ public sealed class ConfigStore
         }
 
         var config = new AppConfig();
-        if (File.Exists(AppPaths.ConfigFile))
+        var hadFile = File.Exists(AppPaths.ConfigFile);
+        var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (hadFile)
         {
             try
             {
-                var text = File.ReadAllText(AppPaths.ConfigFile);
+                var text = System.IO.File.ReadAllText(AppPaths.ConfigFile);
                 if (!string.IsNullOrWhiteSpace(text))
                 {
+                    using var doc = JsonDocument.Parse(text);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                    {
+                        foreach (var prop in doc.RootElement.EnumerateObject())
+                            present.Add(prop.Name);
+                    }
+
                     var loaded = JsonSerializer.Deserialize<AppConfig>(text, JsonOptions);
                     if (loaded is not null) config = loaded;
                 }
@@ -46,6 +55,20 @@ public sealed class ConfigStore
             {
                 note = "config.json 解析失败，已回退默认配置：" + ex.Message;
             }
+        }
+
+        // 版本迁移必须依据“原始 JSON 里有没有这个键”，不能靠反序列化后的字段值判断：
+        // 旧配置没有新字段时会是类默认值，但用户也可能显式保存过与默认值相同的值。
+        if (hadFile && present.Count > 0)
+        {
+            if (ConfigMigrations.Migrate(config, present, out var migrationNote))
+            {
+                // 迁移结果立即落盘：避免每次启动都重复迁移，也便于用户/日志确认迁移后的值
+                Save(config);
+            }
+
+            if (migrationNote is not null)
+                note = note is null ? migrationNote : note + "；" + migrationNote;
         }
 
         config.Normalize();
@@ -96,5 +119,43 @@ public sealed class ConfigStore
         {
             note = "复用旧配置失败，改用默认值：" + ex.Message;
         }
+    }
+}
+
+/// <summary>配置版本迁移：v5 → v6 只补新增字段，不覆盖用户已有的任何选择。</summary>
+internal static class ConfigMigrations
+{
+    /// <summary>返回是否发生了迁移（true 时调用方应立即保存）。</summary>
+    public static bool Migrate(AppConfig config, IReadOnlySet<string> present, out string? note)
+    {
+        note = null;
+
+        var version = present.Contains("ConfigVersion") ? config.ConfigVersion : 5;
+        if (version >= 6)
+        {
+            if (version > 6)
+                note = $"配置 ConfigVersion={version} 高于当前支持的 6，无法识别的字段将被忽略";
+            return false;
+        }
+
+        // 缺失的新字段按“用户已选档位”的预设补齐；旧配置没有档位时按均衡档。
+        var preset = DefragQualityPresets.Get(
+            present.Contains("DefragQuality") ? config.DefragQuality : DefragQualityPresets.Balanced);
+
+        if (!present.Contains("DefragQuality")) config.DefragQuality = DefragQualityPresets.Balanced;
+        if (!present.Contains("MinFileSizeKB")) config.MinFileSizeKB = preset.MinFileSizeKB;
+        if (!present.Contains("MaxFilesPerRun")) config.MaxFilesPerRun = preset.MaxFilesPerRun;
+        if (!present.Contains("MaxBytesPerRunGB")) config.MaxBytesPerRunGB = preset.MaxBytesPerRunGB;
+        if (!present.Contains("MinReclaimMB")) config.MinReclaimMB = preset.MinReclaimMB;
+        if (!present.Contains("VerifyMode")) config.VerifyMode = preset.VerifyMode;
+        if (!present.Contains("MaxRounds")) config.MaxRounds = preset.MaxRounds;
+        if (!present.Contains("MaxRunMinutes")) config.MaxRunMinutes = preset.MaxRunMinutes;
+        if (!present.Contains("SsdOptimizeOnly")) config.SsdOptimizeOnly = true;
+
+        // FragThresholdEnabled / FragThresholdPercent 从 v5 起就存在，这里不做任何改动。
+        config.ConfigVersion = 6;
+        note = $"配置已从 v{version} 迁移到 v6：缺失的整理参数按「{preset.Name}」预设补齐；" +
+               "原有整理方式/碎片率阈值/CPU 阈值保持不变";
+        return true;
     }
 }

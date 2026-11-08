@@ -42,7 +42,9 @@ public static class VolumeAnalyzer
 
         var guard = options.Guard;
         var deadline = DateTime.UtcNow.AddSeconds(Math.Max(options.ScanSeconds, 1));
-        var minBytes = (long)Math.Max(options.MinFileClusters, 1) * geometry.ClusterBytes;
+        var minBytes = options.MinFileSizeKB > 0
+            ? Math.Max(1L, (long)Math.Ceiling(options.MinFileSizeKB * 1024.0 / geometry.ClusterBytes)) * geometry.ClusterBytes
+            : (long)Math.Max(options.MinFileClusters, 1) * geometry.ClusterBytes;
         var root = options.ScanRoot ?? drive;
         if (!root.EndsWith('\\')) root += "\\";
 

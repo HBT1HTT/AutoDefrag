@@ -90,10 +90,17 @@ public static class RewriteCommand
         var minFrag = config.FragThresholdEnabled ? config.FragThresholdPercent : 0;
         var engineMode = EngineResolver.IsValid(config.EngineMode) ? config.EngineMode : EngineResolver.Auto;
         var cpuThreshold = config.CpuThreshold;
-        Logger.Info($"文件级整理参数: 文件碎片率={(minFrag > 0 ? $"≥{minFrag}%" : "不限")} " +
+        var prefs = config.GetDefragPreferences();
+        var qualityName = DefragQualityPresets.Match(prefs)?.Name
+                          ?? (prefs.Quality == DefragQualityPresets.Custom ? "自定义" : DefragQualityPresets.Get(prefs.Quality).Name);
+        Logger.Info($"文件级整理参数: 质量={qualityName} 最小文件={prefs.MinFileSizeKB}KB " +
+                    $"单轮≤{prefs.MaxFilesPerRun}文件/{prefs.MaxBytesPerRunGB}GB 可回收≥{prefs.MinReclaimMB}MB " +
+                    $"校验={prefs.VerifyMode} 最多{prefs.MaxRounds}轮/{(prefs.MaxRunMinutes == 0 ? "不限时" : prefs.MaxRunMinutes + "分钟")} " +
+                    $"固态只优化={(prefs.SsdOptimizeOnly ? "是" : "否")} " +
+                    $"文件碎片率={(minFrag > 0 ? $"≥{minFrag}%" : "不限")} " +
                     $"整理方式={EngineResolver.ModeText(engineMode)} CPU守护={cpuThreshold}%（连续10秒暂停/稳定10秒继续）");
         ProgressLog.Append($"开始{(dryRun ? "预览" : "文件级整理")}：目标={string.Join(",", drives)}；" +
-                           $"整理方式={EngineResolver.ModeText(engineMode)}；CPU守护={cpuThreshold}%");
+                           $"整理方式={EngineResolver.ModeText(engineMode)}；质量={qualityName}；CPU守护={cpuThreshold}%");
 
         var lines = new List<string>();
         var failed = 0;
@@ -115,6 +122,16 @@ public static class RewriteCommand
             var info = DiskService.GetFixedDrives()
                 .FirstOrDefault(d => string.Equals(DiskService.Letter(d), letter, StringComparison.OrdinalIgnoreCase));
             var media = info is null ? DiskMediaKind.Unknown : DiskService.GetMediaKind(info);
+
+            // 固态硬盘默认不做文件级重写：预览也如实说明，避免用户以为“点了没反应”
+            if (prefs.SsdOptimizeOnly && media == DiskMediaKind.Ssd)
+            {
+                lines.Add($"{letter.TrimEnd(':')}: 固态硬盘，按设置跳过文件级重写（避免写入磨损），实际整理时会走系统优化 /O");
+                Logger.Info($"{letter} 是固态硬盘，SsdOptimizeOnly=true：跳过文件级重写，实际整理走系统优化");
+                ProgressLog.Append($"{letter} 跳过：固态硬盘，按设置只做系统优化（不重写文件）");
+                continue;
+            }
+
             var state = new WorkerStateFile
             {
                 Mode = dryRun ? "rewrite-preview" : "rewrite",
@@ -133,14 +150,18 @@ public static class RewriteCommand
 
             var result = LargeClusterRunner.Run(letter, media, clusterBytes, state, dryRun, scanRoot,
                 cpuThreshold: cpuThreshold, highSeconds: 10, lowSeconds: 10,
-                minFragmentPercent: minFrag, engineMode: engineMode);
+                minFragmentPercent: minFrag, engineMode: engineMode, settings: prefs);
             if (result.Status == "失败") failed++;
             var fragText = dryRun
                 ? $"碎片 {FormatFrag(result.PreFrag)} → 未改动（dry-run，整理后未测量）"
                 : result.PostFrag is null
                     ? $"碎片 {FormatFrag(result.PreFrag)} → 未复核"
                     : $"碎片 {FormatFrag(result.PreFrag)} → {FormatFrag(result.PostFrag)}";
-            lines.Add($"{letter.TrimEnd(':')}: {result.Status}，{fragText}");
+            var coverageText = result.CoveragePercent is null
+                ? string.Empty
+                : $"，覆盖率 {result.CoveragePercent:0.#}%（仅已分析文件）";
+            var roundText = result.Rounds > 0 ? $"，{result.Rounds} 轮" : string.Empty;
+            lines.Add($"{letter.TrimEnd(':')}: {result.Status}，{fragText}{coverageText}{roundText}");
         }
 
         var summary = string.Join(Environment.NewLine, lines);

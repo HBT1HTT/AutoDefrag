@@ -27,7 +27,7 @@ public sealed class WorkerService
     }
 
     public bool Start(string mode, string[]? drives, int threshold, bool auto, out string? error, string engine = "Self",
-        int minFragmentPercent = 0)
+        int minFragmentPercent = 0, DefragPreferences? defrag = null)
     {
         error = null;
         if (IsRunning)
@@ -36,7 +36,15 @@ public sealed class WorkerService
             return false;
         }
 
-        var arguments = BuildArguments(mode, drives, threshold, engine, minFragmentPercent);
+        // 上一个进程对象若还没被回收，先释放，避免句柄在内核对象表里堆积
+        if (_process is not null)
+        {
+            try { _process.Dispose(); } catch { /* 已退出进程的 Dispose 失败不影响新任务 */ }
+            _process = null;
+        }
+
+        var prefs = defrag?.Normalized();
+        var arguments = BuildArguments(mode, drives, threshold, engine, minFragmentPercent, prefs);
         var psi = new ProcessStartInfo
         {
             FileName = AppPaths.ExePath,
@@ -71,7 +79,8 @@ public sealed class WorkerService
         IsAuto = auto;
         var modeName = mode == "clean" ? "整理磁盘" : "检查磁盘";
         var thresholdText = mode == "clean"
-            ? $", CPU上限={threshold}%" + (minFragmentPercent > 0 ? $", 文件碎片率≥{minFragmentPercent}%" : ", 全部整理")
+            ? $", CPU上限={threshold}%" + (minFragmentPercent > 0 ? $", 文件碎片率≥{minFragmentPercent}%" : ", 全部整理") +
+              (prefs is null ? string.Empty : $", 质量={prefs.Quality}, 最多{prefs.MaxRounds}轮")
             : string.Empty;
         Logger.Info($"已开始后台任务 (PID={_pid}, 模式={modeName}, 自动={auto}, 目标={(drives is { Length: > 0 } ? string.Join(",", drives) : "(自动)")}{thresholdText})");
         return true;
@@ -86,9 +95,11 @@ public sealed class WorkerService
 
         if (_process is null || IsRunning) return false;
 
-        try { exitCode = _process.ExitCode; }
+        var finished = _process;
+        try { exitCode = finished.ExitCode; }
         catch { exitCode = null; }
 
+        try { finished.Dispose(); } catch { /* 进程已结束，Dispose 异常无需上报 */ }
         _process = null;
         _pid = 0;
         Mode = null;
@@ -96,7 +107,8 @@ public sealed class WorkerService
         return true;
     }
 
-    private static string BuildArguments(string mode, string[]? drives, int threshold, string engine, int minFragmentPercent)
+    private static string BuildArguments(string mode, string[]? drives, int threshold, string engine, int minFragmentPercent,
+        DefragPreferences? prefs)
     {
         var sb = new StringBuilder("--worker ").Append(mode);
         if (drives is { Length: > 0 })
@@ -105,9 +117,20 @@ public sealed class WorkerService
         }
         if (mode == "clean")
         {
+            var p = prefs ?? DefragPreferences.Default;
             sb.Append(" --threshold ").Append(Math.Clamp(threshold, 10, 100));
             sb.Append(" --engine ").Append(EngineResolver.IsValid(engine) ? engine : "Self");
             sb.Append(" --minfrag ").Append(minFragmentPercent is >= 1 and <= 15 ? minFragmentPercent : 0);
+            // 整理质量与 P1/P2 参数：worker 自己做范围夹紧，命令行只负责传递
+            sb.Append(" --quality ").Append(p.Quality);
+            sb.Append(" --minfilekb ").Append(p.MinFileSizeKB);
+            sb.Append(" --maxfiles ").Append(p.MaxFilesPerRun);
+            sb.Append(" --maxbytesgb ").Append(p.MaxBytesPerRunGB);
+            sb.Append(" --minreclaimmb ").Append(p.MinReclaimMB);
+            sb.Append(" --verify ").Append(p.VerifyMode);
+            sb.Append(" --rounds ").Append(p.MaxRounds);
+            sb.Append(" --maxminutes ").Append(p.MaxRunMinutes);
+            sb.Append(" --ssdopt ").Append(p.SsdOptimizeOnly ? "1" : "0");
         }
         else
         {

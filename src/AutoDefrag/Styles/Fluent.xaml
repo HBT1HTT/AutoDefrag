@@ -81,6 +81,22 @@
         <Setter Property="Padding" Value="22,20" />
     </Style>
 
+    <!-- ================= 键盘焦点可视化（鼠标点击不显示，Tab 导航时显示） ================= -->
+    <Style x:Key="ControlFocusVisual">
+        <Setter Property="Control.Template">
+            <Setter.Value>
+                <ControlTemplate>
+                    <Rectangle Margin="2"
+                               Stroke="{DynamicResource Accent}"
+                               StrokeThickness="1.6"
+                               StrokeDashArray="3 2"
+                               RadiusX="5" RadiusY="5"
+                               SnapsToDevicePixels="True" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- ================= 按钮 ================= -->
     <Style x:Key="PrimaryButton" TargetType="Button">
         <Setter Property="Background" Value="{DynamicResource Accent}" />
@@ -89,7 +105,7 @@
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Padding" Value="18,10" />
         <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ControlFocusVisual}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
@@ -121,7 +137,7 @@
         <Setter Property="FontSize" Value="13" />
         <Setter Property="Padding" Value="15,9" />
         <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ControlFocusVisual}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
@@ -153,7 +169,7 @@
         <Setter Property="FontSize" Value="12.5" />
         <Setter Property="Padding" Value="8,4" />
         <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ControlFocusVisual}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
@@ -222,7 +238,7 @@
         <Setter Property="Padding" Value="10,7" />
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ControlFocusVisual}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ComboBoxItem">
@@ -252,7 +268,7 @@
         <Setter Property="FontSize" Value="12.5" />
         <Setter Property="Height" Value="34" />
         <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ControlFocusVisual}" />
         <Setter Property="IsTextSearchEnabled" Value="True" />
         <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
         <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto" />
@@ -297,6 +313,9 @@
                                         <Trigger Property="IsChecked" Value="True">
                                             <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Accent}" />
                                         </Trigger>
+                                        <Trigger Property="IsEnabled" Value="False">
+                                            <Setter Property="Opacity" Value="0.5" />
+                                        </Trigger>
                                     </ControlTemplate.Triggers>
                                 </ControlTemplate>
                             </ToggleButton.Template>
@@ -332,7 +351,7 @@
     <!-- ================= 开关 ================= -->
     <Style x:Key="ToggleSwitch" TargetType="ToggleButton">
         <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ControlFocusVisual}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ToggleButton">
@@ -360,7 +379,7 @@
     <!-- ================= 复选框 ================= -->
     <Style x:Key="FluentCheckBox" TargetType="CheckBox">
         <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ControlFocusVisual}" />
         <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
         <Setter Property="Template">
             <Setter.Value>
@@ -397,7 +416,7 @@
     <!-- ================= 滑块 ================= -->
     <Style x:Key="FluentSlider" TargetType="Slider">
         <Setter Property="Height" Value="26" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ControlFocusVisual}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Slider">
@@ -451,7 +470,7 @@
         <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
         <Setter Property="FontSize" Value="13" />
         <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ControlFocusVisual}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="RadioButton">
@@ -466,10 +485,140 @@
                             <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Accent}" />
                             <Setter Property="Foreground" Value="{DynamicResource OnAccent}" />
                         </Trigger>
+                        <!-- 禁用态必须肉眼可辨：整组置灰时，分段控件不能再看起来像可点的按钮 -->
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.5" />
+                            <Setter Property="Cursor" Value="Arrow" />
+                        </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+    </Style>
+
+    <!-- ================= 整理质量卡片（四档单选，带副标题与选中高亮） ================= -->
+    <Style x:Key="QualityCardRadio" TargetType="RadioButton">
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ControlFocusVisual}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Border x:Name="Bd" CornerRadius="9" Padding="12,10"
+                            Background="{DynamicResource ControlBackground}"
+                            BorderBrush="{DynamicResource ControlBorder}" BorderThickness="1">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ContentPresenter VerticalAlignment="Center" />
+                            <Border x:Name="Mark" Grid.Column="1" Width="18" Height="18" CornerRadius="9"
+                                    Margin="10,0,0,0" VerticalAlignment="Center"
+                                    Background="Transparent"
+                                    BorderBrush="{DynamicResource ControlBorder}" BorderThickness="1">
+                                <Path x:Name="Tick" Data="M3.5,9 L7,12.5 L14.5,5"
+                                      Stroke="{DynamicResource OnAccent}" StrokeThickness="1.8"
+                                      Visibility="Collapsed" />
+                            </Border>
+                        </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentBorder}" />
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource RowHover}" />
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Accent}" />
+                            <Setter TargetName="Bd" Property="BorderThickness" Value="1.5" />
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentSoft}" />
+                            <Setter TargetName="Mark" Property="Background" Value="{DynamicResource Accent}" />
+                            <Setter TargetName="Mark" Property="BorderBrush" Value="{DynamicResource Accent}" />
+                            <Setter TargetName="Tick" Property="Visibility" Value="Visible" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.5" />
+                            <Setter Property="Cursor" Value="Arrow" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ================= 参数小节标题（带左侧强调条） ================= -->
+    <Style x:Key="SubGroupTitle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+        <Setter Property="Margin" Value="0,6,0,8" />
+    </Style>
+
+    <!-- ================= 滚动条（跟随深浅色，避免默认白底在深色主题下刺眼） ================= -->
+    <Style TargetType="ScrollBar">
+        <Setter Property="Width" Value="10" />
+        <Setter Property="MinWidth" Value="10" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ScrollBar">
+                    <Grid Background="{TemplateBinding Background}">
+                        <Track x:Name="PART_Track" IsDirectionReversed="True">
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton x:Name="Decrease" Command="ScrollBar.PageUpCommand" Focusable="False">
+                                    <RepeatButton.Template>
+                                        <ControlTemplate TargetType="RepeatButton">
+                                            <Border Background="Transparent" />
+                                        </ControlTemplate>
+                                    </RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.DecreaseRepeatButton>
+                            <Track.Thumb>
+                                <Thumb>
+                                    <Thumb.Template>
+                                        <ControlTemplate TargetType="Thumb">
+                                            <Border CornerRadius="4" Margin="2,1"
+                                                    Background="{DynamicResource TextTertiary}" Opacity="0.55" />
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Track.Thumb>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton x:Name="Increase" Command="ScrollBar.PageDownCommand" Focusable="False">
+                                    <RepeatButton.Template>
+                                        <ControlTemplate TargetType="RepeatButton">
+                                            <Border Background="Transparent" />
+                                        </ControlTemplate>
+                                    </RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.IncreaseRepeatButton>
+                        </Track>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="Orientation" Value="Horizontal">
+                            <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False" />
+                            <Setter TargetName="Decrease" Property="Command" Value="ScrollBar.PageLeftCommand" />
+                            <Setter TargetName="Increase" Property="Command" Value="ScrollBar.PageRightCommand" />
+                            <Setter Property="Height" Value="10" />
+                            <Setter Property="Width" Value="Auto" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ================= ToolTip（全局统一外观；生命周期由 ToolTipGuard 统一收口） ================= -->
+    <Style TargetType="{x:Type ToolTip}">
+        <Setter Property="Background" Value="{DynamicResource CardBackground}" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource CardBorder}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="10,7" />
+        <Setter Property="FontFamily" Value="{DynamicResource AppFont}" />
+        <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="HasDropShadow" Value="False" />
     </Style>
 
 </ResourceDictionary>

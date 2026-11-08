@@ -51,6 +51,7 @@ public partial class App : System.Windows.Application
 
         AppPaths.Ensure();
         Logger.Init("app");
+        ToolTipGuard.Initialize();
 
         var silent = e.Args.Any(a => string.Equals(a, "--tray", StringComparison.OrdinalIgnoreCase));
         WriteStartupBanner(silent);
@@ -132,7 +133,7 @@ public partial class App : System.Windows.Application
     private static void WriteStartupBanner(bool silent)
     {
         var bootTime = DateTime.Now - TimeSpan.FromMilliseconds(Environment.TickCount64);
-        var source = silent ? "开机自启(Run 键)" : "手动启动";
+        var source = silent ? "静默启动(--tray)" : "手动启动";
         Logger.Info(
             $"================ 启动会话 | 本次开机于 {bootTime:yyyy-MM-dd HH:mm:ss} " +
             $"| 会话ID={Process.GetCurrentProcess().SessionId} | PID={Environment.ProcessId} " +

@@ -42,7 +42,7 @@ public static class DefragEngine
 
 
     public static int RunClean(string[] drives, int cpuThreshold, string engineMode = "Self", int highSeconds = 10, int lowSeconds = 10,
-        int minFragmentPercent = 0)
+        int minFragmentPercent = 0, DefragPreferences? settings = null)
     {
         var targets = FilterToFixed(drives);
         if (targets.Count == 0)
@@ -51,6 +51,10 @@ public static class DefragEngine
             return 2;
         }
 
+        var prefs = (settings ?? DefragPreferences.Default).Normalized();
+        var qualityName = DefragQualityPresets.Match(prefs)?.Name
+                          ?? (prefs.Quality == DefragQualityPresets.Custom ? "自定义" : DefragQualityPresets.Get(prefs.Quality).Name);
+
         // 上次可能残留停止标记（例如在 worker 完成后才创建的），开始时清掉，避免本次一启动就停
         ClearStopFlag();
         ProgressLog.Begin();
@@ -58,8 +62,11 @@ public static class DefragEngine
         var modeText = EngineResolver.ModeText(engineMode);
         Logger.Info($"================ 开始整理磁盘: 目标={string.Join(",", targets)} CPU上限={cpuThreshold}% " +
                     $"整理方式={modeText} 文件碎片率={(minFragmentPercent > 0 ? $"≥{minFragmentPercent}%" : "不限")} " +
+                    $"整理质量={qualityName} 最小文件={prefs.MinFileSizeKB}KB 单轮≤{prefs.MaxFilesPerRun}文件/{prefs.MaxBytesPerRunGB}GB " +
+                    $"可回收≥{prefs.MinReclaimMB}MB 校验={prefs.VerifyMode} 最多{prefs.MaxRounds}轮/{(prefs.MaxRunMinutes == 0 ? "不限时" : prefs.MaxRunMinutes + "分钟")} " +
+                    $"固态只优化={(prefs.SsdOptimizeOnly ? "是" : "否")} " +
                     $"持续{highSeconds}s暂停/回落{lowSeconds}s继续 ================");
-        ProgressLog.Append($"开始整理：目标={string.Join(",", targets)}；整理方式={modeText}");
+        ProgressLog.Append($"开始整理：目标={string.Join(",", targets)}；整理方式={modeText}；质量={qualityName}");
 
         var state = new WorkerStateFile
         {
@@ -98,6 +105,9 @@ public static class DefragEngine
             state.ProcessedBytes = 0;
             state.TotalBytes = 0;
             state.SpeedBytesPerSec = 0;
+            state.Round = 0;
+            state.RoundTotal = 0;
+            state.CoveragePercent = -1;
             state.Message = $"正在分析 {drive} 的碎片率";
             state.Stage = "分析碎片";
             state.Save();
@@ -129,10 +139,42 @@ public static class DefragEngine
                     continue;
                 }
 
+                // 固态硬盘上的大簇卷：默认不做文件级重写（避免无谓写入磨损），改为系统优化 /O。
+                // 必须明确写日志/进度/结果说明，避免用户误以为“点了没反应”。
+                if (prefs.SsdOptimizeOnly && media == DiskMediaKind.Ssd)
+                {
+                    var optimize = BuildPlan(drive, media, null, volumeBytes, freeBytes, clusterBytes);
+                    Logger.Info($"{drive} 是固态硬盘且存储块为 {DiskService.ClusterText(clusterBytes)}：" +
+                                "按设置跳过文件级重写（避免写入磨损），改为系统优化 " + optimize.CommandLine);
+                    ProgressLog.Append($"{drive} 固态硬盘：不做文件级重写（避免写入磨损），改为系统优化 {optimize.Arguments}");
+                    state.Engine = "系统优化";
+                    state.EngineDetail = decision + "；固态硬盘默认跳过文件级重写";
+                    state.Stage = $"正在{optimize.Verb}";
+                    state.Message = $"固态硬盘：正在{optimize.Verb} {drive}（已跳过文件级重写）";
+                    state.Save();
+
+                    var optimizeRun = RunOneDrive(drive, optimize, null, cpuThreshold, highSeconds, lowSeconds, state);
+                    results.Add(new DriveRunResult(
+                        drive, media, optimize.Arguments, optimizeRun.ExitCode,
+                        optimizeRun.Suspended, optimizeRun.Resumed,
+                        optimizeRun.StartTime, optimizeRun.EndTime,
+                        optimizeRun.Status, null, null, clusterBytes, null, 0));
+                    continue;
+                }
+
+                if (media == DiskMediaKind.Ssd)
+                {
+                    Logger.Warn($"{drive} 是固态硬盘，但设置允许文件级重写（SsdOptimizeOnly=false），将执行重写；这会增加写入量");
+                }
+                else if (prefs.SsdOptimizeOnly && media == DiskMediaKind.Unknown)
+                {
+                    Logger.Warn($"{drive} 介质类型无法识别：保守起见仍按文件级重写处理（系统 /O 对该簇大小可能无效）");
+                }
+
                 Logger.Info($"{drive} 的存储块为 {DiskService.ClusterText(clusterBytes)}（大于 4KB）：不使用系统 defrag，改走文件级重写整理");
                 var large = LargeClusterRunner.Run(drive, media, clusterBytes, state, dryRun: false,
                     scanRoot: null, cpuThreshold: cpuThreshold, highSeconds: highSeconds, lowSeconds: lowSeconds,
-                    minFragmentPercent: minFragmentPercent, engineMode: engineMode);
+                    minFragmentPercent: minFragmentPercent, engineMode: engineMode, settings: prefs);
                 results.Add(large);
                 continue;
             }
@@ -201,7 +243,10 @@ public static class DefragEngine
         var summary = string.Join("; ", results.Select(r =>
             $"{r.Drive}[{DiskService.MediaText(r.Media)} 存储块={DiskService.ClusterText(r.ClusterBytes)} {r.Arguments} " +
             $"方式={EngineResolver.Describe(engineMode, r.ClusterBytes)}] " +
-            $"状态={r.Status},exit={r.ExitCode?.ToString() ?? "--"},暂停={r.Suspended},继续={r.Resumed},碎片{FormatFrag(r.PreFrag)}->{FormatFrag(r.PostFrag)}"));
+            $"状态={r.Status},exit={r.ExitCode?.ToString() ?? "--"},暂停={r.Suspended},继续={r.Resumed}," +
+            $"碎片{FormatFrag(r.PreFrag)}->{FormatFrag(r.PostFrag)}" +
+            (r.CoveragePercent is null ? string.Empty : $",覆盖率={r.CoveragePercent:0.#}%（仅已分析文件）") +
+            (r.Rounds > 0 ? $",轮次={r.Rounds}" : string.Empty)));
 
         Logger.Info($"全部完成: 成功={okCount}/{total}  累计暂停={results.Sum(r => r.Suspended)}次 继续={results.Sum(r => r.Resumed)}次   明细: {summary}");
         WriteLastResult(string.Join(",", targets), summary, okCount, total);
@@ -234,7 +279,7 @@ public static class DefragEngine
         state.Save();
         ProgressLog.Append(anyStopped ? $"整理已停止：成功 {okCount}/{total}" : $"整理结束：成功 {okCount}/{total}");
 
-        return okCount == total ? 0 : 1;
+        return anyStopped ? 4 : (okCount == total ? 0 : 1);
     }
 
     public static int RunStatus(string[] drives, int cpuThreshold = 70, int highSeconds = 10, int lowSeconds = 10)
@@ -249,6 +294,8 @@ public static class DefragEngine
         }
 
         Logger.Info($"================ 开始检查磁盘碎片: 目标={string.Join(",", targets)} ================");
+        // 每次新检查都从干净状态开始；上次异常退出残留的停止标记不应中断本次检查
+        ClearStopFlag();
         ProgressLog.Begin();
         ProgressLog.Append($"开始检查碎片：目标={string.Join(",", targets)}");
 
@@ -338,7 +385,9 @@ public static class DefragEngine
         state.Save();
         ProgressLog.Append(stopped ? "碎片检查已停止" : "碎片检查完成");
 
-        return 0;
+        // 停止标记只对“本次检查”有效；检查结束即清理，避免残留影响下一次整理
+        ClearStopFlag();
+        return stopped ? 4 : 0;
     }
 
     /// <summary>
@@ -429,6 +478,9 @@ public static class DefragEngine
             Logger.Error($"启动 defrag.exe 失败({drive}): 命令=defrag.exe {plan.CommandLine}  进程对象为空");
             return new DriveRunResult(drive, plan.Media, plan.Arguments, null, 0, 0, startTime, DateTime.Now, "启动失败", null, null);
         }
+
+        // 进程对象要在返回前释放；否则每次整理都会留下一个句柄/内核对象
+        using var processLifetime = process;
 
         var lastLoggedPercent = -1;
         void CaptureLine(string? line)
@@ -1084,4 +1136,6 @@ public sealed record DriveRunResult(
     string Status,
     double? PreFrag,
     double? PostFrag,
-    int ClusterBytes = 0);
+    int ClusterBytes = 0,
+    double? CoveragePercent = null,
+    int Rounds = 0);

@@ -105,8 +105,11 @@ public sealed class RewriteOptions
     /// <summary>单次最多复制多少字节。</summary>
     public long MaxBytes { get; init; } = 8L * 1024 * 1024 * 1024;
 
-    /// <summary>小于该簇数的文件不参与（默认 8 簇）。</summary>
+    /// <summary>小于该簇数的文件不参与（默认 8 簇）；MinFileSizeKB &gt; 0 时以 KB 门槛为准。</summary>
     public int MinFileClusters { get; init; } = 8;
+
+    /// <summary>最小处理文件大小（KB）；0 表示只按 MinFileClusters 判断（预览/状态检查等旧路径）。</summary>
+    public int MinFileSizeKB { get; init; }
 
     /// <summary>枚举上限，避免在超大卷上扫太久。</summary>
     public int MaxScanFiles { get; init; } = 200_000;
@@ -128,6 +131,15 @@ public sealed class RewriteOptions
 
     /// <summary>执行前额外预留的空闲簇数（0 表示按 0.5% 自动计算）。</summary>
     public long SafetyReserveClusters { get; init; }
+
+    /// <summary>整理后校验方式：Auto / Full / Sample（不提供“完全不校验”）。</summary>
+    public string VerifyMode { get; init; } = "Auto";
+
+    /// <summary>多轮整理上限（每轮重新扫描候选）；1 表示只跑一轮。</summary>
+    public int MaxRounds { get; init; } = 1;
+
+    /// <summary>整个任务总时长上限（分钟），0 = 不限；达到后不再开始新的一轮。</summary>
+    public int MaxRunMinutes { get; init; }
 
     /// <summary>出现该文件即停止后续文件（当前文件不强行中断）。</summary>
     public string StopFlagFile { get; init; } = AppPaths.StopFlagFile;
@@ -180,6 +192,9 @@ public sealed class RewriteSummary
     public List<RewriteFileResult> Results { get; } = new();
     public bool Stopped { get; set; }
     public long RewrittenBytes { get; set; }
+
+    /// <summary>实际执行的整理轮次（每轮重新扫描候选）。</summary>
+    public int Rounds { get; set; }
 
     public int Succeeded => Results.Count(r => r.Status == "成功");
     public int Failed => Results.Count(r => r.Status is "失败" or "已回滚");

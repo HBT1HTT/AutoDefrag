@@ -53,8 +53,27 @@ public static class WorkerHost
             }
 
             var modeName = isClean ? "整理磁盘" : "检查磁盘";
+
+            // 整理质量与 P1/P2 参数：worker 自己再规范化一次，防止旧版 UI 或手写命令行传入越界值
+            var prefs = new DefragPreferences(
+                GetValue(args, "--quality") ?? DefragQualityPresets.Balanced,
+                minFrag > 0,
+                minFrag > 0 ? minFrag : 10,
+                GetInt(args, "--minfilekb", 32),
+                GetInt(args, "--maxfiles", 80),
+                GetInt(args, "--maxbytesgb", 16),
+                GetInt(args, "--minreclaimmb", 4),
+                GetValue(args, "--verify") ?? "Auto",
+                GetInt(args, "--rounds", 3),
+                GetInt(args, "--maxminutes", 120),
+                (GetValue(args, "--ssdopt") ?? "1") != "0").Normalized();
+
+            var qualityName = DefragQualityPresets.Match(prefs)?.Name
+                              ?? (prefs.Quality == DefragQualityPresets.Custom ? "自定义" : DefragQualityPresets.Get(prefs.Quality).Name);
             var thresholdLog = isClean
-                ? $", CPU上限={threshold}%, 整理方式={EngineResolver.ModeText(engine)}, 文件碎片率={(minFrag > 0 ? $"≥{minFrag}%" : "不限")}"
+                ? $", CPU上限={threshold}%, 整理方式={EngineResolver.ModeText(engine)}, 文件碎片率={(minFrag > 0 ? $"≥{minFrag}%" : "不限")}" +
+                  $", 质量={qualityName}, 最小文件={prefs.MinFileSizeKB}KB, 单轮≤{prefs.MaxFilesPerRun}文件/{prefs.MaxBytesPerRunGB}GB" +
+                  $", 可回收≥{prefs.MinReclaimMB}MB, 校验={prefs.VerifyMode}, 最多{prefs.MaxRounds}轮, 固态只优化={(prefs.SsdOptimizeOnly ? "是" : "否")}"
                 : ", CPU上限=(检查磁盘时不需要)";
             Logger.Info($"后台任务启动: 模式={modeName}({mode}), 磁盘={(drives.Length == 0 ? "(自动)" : string.Join(",", drives))}{thresholdLog}");
 
@@ -66,7 +85,7 @@ public static class WorkerHost
             }
 
             var code = isClean
-                ? DefragEngine.RunClean(drives, threshold, engine, 10, 10, minFrag)
+                ? DefragEngine.RunClean(drives, threshold, engine, 10, 10, minFrag, prefs)
                 : DefragEngine.RunStatus(drives, threshold, 10, 10);
 
             Logger.Info($"后台任务结束: exit={code}");
@@ -94,5 +113,12 @@ public static class WorkerHost
             }
         }
         return null;
+    }
+
+    private static int GetInt(string[] args, string name, int fallback)
+    {
+        var text = GetValue(args, name);
+        if (text is null) return fallback;
+        return int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : fallback;
     }
 }

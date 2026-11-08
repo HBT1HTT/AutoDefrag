@@ -191,9 +191,21 @@ public static class RewriteReport
             ? $"只整理文件级碎片率 ≥ {plan.Options.MinFragmentationPercent:0.#}% 的文件（未达阈值的跳过并计入下方统计）"
             : "全部合格候选（不按碎片率过滤）")}");
         sb.AppendLine($"安全余量、单批上限: 文件数<={plan.Options.MaxFiles} 字节数<={DiskService.FormatBytes(plan.Options.MaxBytes)}  " +
-                      $"最小文件={plan.Options.MinFileClusters} 簇  最小碎片率={plan.Options.MinFragmentationPercent:0.#}%  " +
-                      $"最小回收={DiskService.FormatBytes(plan.Options.MinReclaimBytes)}");
+                      $"最小文件={(plan.Options.MinFileSizeKB > 0 ? $"{plan.Options.MinFileSizeKB}KB({plan.Options.MinFileClusters}簇)" : $"{plan.Options.MinFileClusters} 簇")}  " +
+                      $"最小碎片率={plan.Options.MinFragmentationPercent:0.#}%  最小回收={DiskService.FormatBytes(plan.Options.MinReclaimBytes)}");
+        sb.AppendLine($"整理质量参数: 校验={VerifyText(plan.Options.VerifyMode)}  " +
+                      $"轮次上限={plan.Options.MaxRounds}  " +
+                      $"总时长上限={(plan.Options.MaxRunMinutes <= 0 ? "不限" : $"{plan.Options.MaxRunMinutes} 分钟")}");
+        sb.AppendLine("碎片率口径: 只统计本次实际分析到的文件（覆盖率见上方），不代表整卷碎片率；" +
+                      "系统文件/MFT/空闲空间布局不在本报告口径内。");
         sb.AppendLine("停止方式: 创建 Data\\rewrite_stop.flag，当前文件做完后停止继续（已完成的文件不会回滚）。");
         sb.AppendLine("================================================================");
     }
+
+    private static string VerifyText(string mode) => mode switch
+    {
+        "Full" => "全量 SHA256（最慢，误判最少）",
+        "Sample" => "首/中/尾抽样 SHA256（最快，只覆盖 3×4MB）",
+        _ => "自动（≤2GB 全量，超过抽样）"
+    };
 }

@@ -45,6 +45,15 @@ public sealed class WorkerStateFile
     /// <summary>本盘本轮平均速度（字节/秒）；0 表示未知。</summary>
     public long SpeedBytesPerSec { get; set; }
 
+    /// <summary>当前第几轮（多轮整理，从 1 开始）；0 表示未开始/不适用。</summary>
+    public int Round { get; set; }
+
+    /// <summary>本盘允许的最大轮次。</summary>
+    public int RoundTotal { get; set; }
+
+    /// <summary>覆盖率：已分析文件的簇 / 卷总簇（%）；-1 表示未知。只代表已分析文件，不是整卷。</summary>
+    public double CoveragePercent { get; set; } = -1;
+
     public string StartedAt { get; set; } = string.Empty;
     public string UpdatedAt { get; set; } = string.Empty;
 

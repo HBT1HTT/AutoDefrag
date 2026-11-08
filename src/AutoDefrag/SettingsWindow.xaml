@@ -107,20 +107,120 @@
                     </StackPanel>
                 </Border>
 
-                <!-- ================= 整理范围 ================= -->
-                <Border Style="{StaticResource Card}" Padding="18,16" Margin="0,10,0,0">
+                <!-- ================= 整理设置 ================= -->
+                <Border x:Name="DefragSettingsCard" Style="{StaticResource Card}" Padding="18,16" Margin="0,10,0,0">
                     <StackPanel>
-                        <TextBlock Text="整理范围" Style="{StaticResource CardTitle}" Margin="0,0,0,12" />
+                        <TextBlock Text="整理设置" Style="{StaticResource CardTitle}" Margin="0,0,0,6" />
+                        <TextBlock Text="整理方式决定这组参数是否可调；修改后点“保存”生效。"
+                                   Style="{StaticResource HintText}" TextWrapping="Wrap" Margin="0,0,0,10" />
 
-                        <Grid Margin="0,0,0,8">
+                        <!-- 只读门控提示放在禁用面板之外，保证置灰时仍然可读、可操作 -->
+                        <Border x:Name="DefragGateBanner" Visibility="{Binding DefragGateVisibility}"
+                                Background="{DynamicResource AccentSoft}"
+                                BorderBrush="{DynamicResource AccentBorder}" BorderThickness="1"
+                                CornerRadius="9" Padding="12,10" Margin="0,0,0,12">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="{Binding DefragGateTitle}" FontSize="13" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource TextPrimary}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding DefragGateHint}" FontSize="12" LineHeight="18"
+                                               Foreground="{DynamicResource TextSecondary}"
+                                               TextWrapping="Wrap" Margin="0,4,0,0" />
+                                </StackPanel>
+                                <Button x:Name="UseSelfEngineButton" Grid.Column="1" Content="切换为「本程序整理」"
+                                        Style="{StaticResource SecondaryButton}" Padding="12,7" FontSize="12.5"
+                                        Click="UseSelfEngine_Click"
+                                        VerticalAlignment="Center" Margin="12,0,0,0" />
+                            </Grid>
+                        </Border>
+
+                        <StackPanel x:Name="DefragSettingsBody" IsEnabled="{Binding DefragSettingsEnabled}">
+                            <StackPanel.Style>
+                                <Style TargetType="StackPanel">
+                                    <Style.Triggers>
+                                        <Trigger Property="IsEnabled" Value="False">
+                                            <Setter Property="Opacity" Value="0.72" />
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </StackPanel.Style>
+
+                            <TextBlock Text="整理质量" FontSize="13.5" FontWeight="SemiBold" />
+                            <TextBlock Text="选一档会自动套用下面整组参数；手动改动任意一项后显示为「自定义」，不会强行改回。"
+                                       Style="{StaticResource HintText}" TextWrapping="Wrap" Margin="0,2,0,10" />
+
+                            <UniformGrid Columns="2" Margin="0,0,0,2">
+                                <RadioButton x:Name="QualityFast" Tag="Fast" Style="{StaticResource QualityCardRadio}"
+                                             AutomationProperties.Name="最快"
+                                             Checked="Quality_Checked" Margin="0,0,8,8">
+                                    <StackPanel>
+                                        <TextBlock Text="最快" FontSize="13.5" FontWeight="SemiBold" />
+                                        <TextBlock Text="只处理大且碎的文件，耗时最短" Style="{StaticResource HintText}"
+                                                   TextWrapping="Wrap" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                </RadioButton>
+                                <RadioButton x:Name="QualityBalanced" Tag="Balanced" Style="{StaticResource QualityCardRadio}"
+                                             AutomationProperties.Name="均衡"
+                                             Checked="Quality_Checked" Margin="0,0,0,8">
+                                    <StackPanel>
+                                        <TextBlock Text="均衡（推荐）" FontSize="13.5" FontWeight="SemiBold" />
+                                        <TextBlock Text="覆盖与耗时折中，适合日常" Style="{StaticResource HintText}"
+                                                   TextWrapping="Wrap" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                </RadioButton>
+                                <RadioButton x:Name="QualityThorough" Tag="Thorough" Style="{StaticResource QualityCardRadio}"
+                                             AutomationProperties.Name="最彻底"
+                                             Checked="Quality_Checked" Margin="0,0,8,0">
+                                    <StackPanel>
+                                        <TextBlock Text="最彻底" FontSize="13.5" FontWeight="SemiBold" />
+                                        <TextBlock Text="尽量少碎片，耗时最长" Style="{StaticResource HintText}"
+                                                   TextWrapping="Wrap" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                </RadioButton>
+                                <RadioButton x:Name="QualityCustom" Tag="Custom" Style="{StaticResource QualityCardRadio}"
+                                             AutomationProperties.Name="自定义"
+                                             Checked="Quality_Checked" Margin="0,0,0,0">
+                                    <StackPanel>
+                                        <TextBlock Text="自定义" FontSize="13.5" FontWeight="SemiBold" />
+                                        <TextBlock Text="保留当前值，下面参数自己调" Style="{StaticResource HintText}"
+                                                   TextWrapping="Wrap" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                </RadioButton>
+                            </UniformGrid>
+
+                            <TextBlock Text="{Binding QualitySummary}" Style="{StaticResource HintText}"
+                                       TextWrapping="Wrap" Margin="0,10,0,0" />
+                            <Border Background="{DynamicResource AccentSoft}"
+                                    BorderBrush="{DynamicResource AccentBorder}" BorderThickness="1"
+                                    CornerRadius="7" Padding="10,8" Margin="0,8,0,0"
+                                    Visibility="{Binding QualityCustomVisibility}">
+                                <TextBlock Text="当前为「自定义」：已保留你现有的数值；修改任意一项会按数值重新判定档位，选择上面任一档会重新套用该档参数。"
+                                           Foreground="{DynamicResource TextPrimary}" FontSize="12"
+                                           TextWrapping="Wrap" />
+                            </Border>
+
+                            <Separator Margin="0,14,0,10" />
+
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                <Border Width="3" Height="14" CornerRadius="1.5"
+                                        Background="{DynamicResource Accent}" Margin="0,0,8,0" />
+                                <TextBlock Text="筛选条件" Style="{StaticResource SubGroupTitle}" Margin="0" />
+                            </StackPanel>
+
+                        <!-- 碎片率阈值（从原“整理范围”迁入，语义不变） -->
+                        <Grid Margin="0,0,0,6">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0">
                                 <TextBlock Text="只整理碎片较多的文件" FontSize="13.5" />
-                                <TextBlock Text="勾选后只处理碎片率达到阈值的文件；不勾选则全部整理"
-                                           Style="{StaticResource HintText}" />
+                                <TextBlock Text="勾选后只处理文件级碎片率达到阈值的文件；不勾选则全部整理"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
                             </StackPanel>
                             <ToggleButton Grid.Column="1" Style="{StaticResource ToggleSwitch}"
                                           IsChecked="{Binding FragThresholdEnabled, Mode=TwoWay}"
@@ -137,21 +237,203 @@
                                 <TextBlock Text="是每个文件自身的碎片率，不是整张磁盘" Style="{StaticResource HintText}" />
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                <TextBox Width="64" MaxLength="2" Style="{StaticResource FluentTextBox}"
+                                <TextBox Width="64" MaxLength="2" Tag="2" Style="{StaticResource FluentTextBox}"
                                          Text="{Binding FragThresholdText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                         PreviewTextInput="FragThreshold_PreviewTextInput"
-                                         PreviewKeyDown="FragThreshold_PreviewKeyDown"
-                                         DataObject.Pasting="FragThreshold_Pasting" />
+                                         PreviewTextInput="Number_PreviewTextInput"
+                                         PreviewKeyDown="Number_PreviewKeyDown"
+                                         DataObject.Pasting="Number_Pasting" />
                                 <TextBlock Text="%" Margin="6,0,0,0" VerticalAlignment="Center" />
                             </StackPanel>
                         </Grid>
-
                         <TextBlock Text="阈值范围 1–15%，默认 10%。调低更彻底但耗时更长；调高更快，但会留下较多零头。"
-                                   Style="{StaticResource HintText}" TextWrapping="Wrap" Margin="0,2,0,0" />
-
+                                   Style="{StaticResource HintText}" TextWrapping="Wrap" Margin="0,2,0,10" />
                         <TextBlock Text="碎片率阈值只能是 1–15 的整数，超出范围不会保存"
                                    Foreground="{DynamicResource Danger}" FontSize="12"
-                                   Visibility="{Binding FragThresholdErrorVisibility}" Margin="0,6,0,0" />
+                                   Visibility="{Binding FragThresholdErrorVisibility}" Margin="0,0,0,10" />
+
+                        <!-- 高级参数：数值由上面档位自动套用 -->
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="最小处理文件大小" FontSize="13.5" />
+                                <TextBlock Text="越小覆盖率越高、耗时越长；4–4096 KB"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBox x:Name="MinFileSizeBox" Width="64" MaxLength="4" Tag="4"
+                                         Style="{StaticResource FluentTextBox}"
+                                         Text="{Binding MinFileSizeText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         PreviewTextInput="Number_PreviewTextInput"
+                                         PreviewKeyDown="Number_PreviewKeyDown"
+                                         DataObject.Pasting="Number_Pasting" />
+                                <TextBlock Text="KB" Margin="6,0,0,0" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Grid>
+
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,10">
+                            <Border Width="3" Height="14" CornerRadius="1.5"
+                                    Background="{DynamicResource Accent}" Margin="0,0,8,0" />
+                            <TextBlock Text="单轮容量" Style="{StaticResource SubGroupTitle}" Margin="0" />
+                        </StackPanel>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="单轮最多文件数" FontSize="13.5" />
+                                <TextBlock Text="每一轮最多处理多少个文件；10–500"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <TextBox x:Name="MaxFilesBox" Grid.Column="1" Width="64" MaxLength="3" Tag="3"
+                                     Style="{StaticResource FluentTextBox}" VerticalAlignment="Center"
+                                     Text="{Binding MaxFilesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     PreviewTextInput="Number_PreviewTextInput"
+                                     PreviewKeyDown="Number_PreviewKeyDown"
+                                     DataObject.Pasting="Number_Pasting" />
+                        </Grid>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="单轮最多数据量" FontSize="13.5" />
+                                <TextBlock Text="每一轮最多复制多少数据；1–64 GB"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBox x:Name="MaxBytesBox" Width="64" MaxLength="2" Tag="2"
+                                         Style="{StaticResource FluentTextBox}"
+                                         Text="{Binding MaxBytesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         PreviewTextInput="Number_PreviewTextInput"
+                                         PreviewKeyDown="Number_PreviewKeyDown"
+                                         DataObject.Pasting="Number_Pasting" />
+                                <TextBlock Text="GB" Margin="6,0,0,0" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Grid>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="可回收空间下限" FontSize="13.5" />
+                                <TextBlock Text="一个文件至少有多少碎片空间值得重写；0–64 MB"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBox x:Name="MinReclaimBox" Width="64" MaxLength="2" Tag="2"
+                                         Style="{StaticResource FluentTextBox}"
+                                         Text="{Binding MinReclaimText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         PreviewTextInput="Number_PreviewTextInput"
+                                         PreviewKeyDown="Number_PreviewKeyDown"
+                                         DataObject.Pasting="Number_Pasting" />
+                                <TextBlock Text="MB" Margin="6,0,0,0" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Grid>
+
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,10">
+                            <Border Width="3" Height="14" CornerRadius="1.5"
+                                    Background="{DynamicResource Accent}" Margin="0,0,8,0" />
+                            <TextBlock Text="校验与轮次" Style="{StaticResource SubGroupTitle}" Margin="0" />
+                        </StackPanel>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="整理后校验" FontSize="13.5" />
+                                <TextBlock Text="复制完必须校验，不提供“不校验”；全量最稳但最慢"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ComboBox x:Name="VerifyBox" Grid.Column="1" Width="150"
+                                      Style="{StaticResource FluentComboBox}" VerticalAlignment="Center"
+                                      SelectedIndex="{Binding VerifyIndex, Mode=TwoWay}">
+                                <ComboBoxItem Content="自动（≤2GB 全量）" />
+                                <ComboBoxItem Content="全量校验" />
+                                <ComboBoxItem Content="抽样校验" />
+                            </ComboBox>
+                        </Grid>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="多轮整理上限" FontSize="13.5" />
+                                <TextBlock Text="每轮重新扫描，直到没有合格候选；1–10 轮"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBox x:Name="MaxRoundsBox" Width="64" MaxLength="2" Tag="2"
+                                         Style="{StaticResource FluentTextBox}"
+                                         Text="{Binding MaxRoundsText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         PreviewTextInput="Number_PreviewTextInput"
+                                         PreviewKeyDown="Number_PreviewKeyDown"
+                                         DataObject.Pasting="Number_Pasting" />
+                                <TextBlock Text="轮" Margin="6,0,0,0" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Grid>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="整个任务时长上限" FontSize="13.5" />
+                                <TextBlock Text="0 = 不限；达到上限后不再开始新的一轮（0–1440 分钟）"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBox x:Name="MaxMinutesBox" Width="64" MaxLength="4" Tag="4"
+                                         Style="{StaticResource FluentTextBox}"
+                                         Text="{Binding MaxMinutesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                         PreviewTextInput="Number_PreviewTextInput"
+                                         PreviewKeyDown="Number_PreviewKeyDown"
+                                         DataObject.Pasting="Number_Pasting" />
+                                <TextBlock Text="分钟" Margin="6,0,0,0" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Grid>
+
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,10">
+                            <Border Width="3" Height="14" CornerRadius="1.5"
+                                    Background="{DynamicResource Accent}" Margin="0,0,8,0" />
+                            <TextBlock Text="介质策略" Style="{StaticResource SubGroupTitle}" Margin="0" />
+                        </StackPanel>
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="固态硬盘只做系统优化" FontSize="13.5" />
+                                <TextBlock Text="固态硬盘上的大簇卷不做文件级重写，避免无谓写入磨损；机械硬盘不受影响。默认开启"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ToggleButton x:Name="SsdOptimizeToggle" Grid.Column="1" Style="{StaticResource ToggleSwitch}"
+                                          IsChecked="{Binding SsdOptimizeOnly, Mode=TwoWay}"
+                                          VerticalAlignment="Center" />
+                        </Grid>
+
+                        <TextBlock Text="即使选了「本程序整理」，4KB 及以下存储块的磁盘仍由 Windows 自带整理处理，这些参数对它们不生效。"
+                                   Style="{StaticResource HintText}" TextWrapping="Wrap" Margin="0,10,0,0" />
+
+                        <TextBlock Text="参数超出允许范围，请检查标红的项后再保存"
+                                   Foreground="{DynamicResource Danger}" FontSize="12" TextWrapping="Wrap"
+                                   Visibility="{Binding DefragErrorVisibility}" Margin="0,8,0,0" />
+                        </StackPanel>
                     </StackPanel>
                 </Border>
 
@@ -253,7 +535,7 @@
                             <StackPanel Grid.Column="0">
                                 <TextBlock Text="CPU 占用上限" FontSize="13.5" />
                                 <TextBlock Text="电脑整机 CPU 连续 10 秒高于这个值时，整理会暂停读写（包括整理前和整理后的 /A 分析预检）；回落到阈值以下并稳定 10 秒后自动继续（每秒采样）。阈值应高于平时的后台占用，否则会长时间暂停。保存后对下一次整理生效"
-                                           Style="{StaticResource HintText}" />
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
                             </StackPanel>
                             <TextBlock Grid.Column="1" Text="{Binding CpuThresholdText}"
                                        Style="{StaticResource ValueText}"
@@ -278,10 +560,10 @@
             <TextBlock Grid.Column="0" Text="保存后立即生效"
                        Style="{StaticResource HintText}" VerticalAlignment="Center" />
 
-            <Button Grid.Column="1" Content="取消" Style="{StaticResource SecondaryButton}"
-                    Click="Cancel_Click" MinWidth="88" />
-            <Button Grid.Column="2" Content="保存" Style="{StaticResource PrimaryButton}"
-                    Click="Save_Click" Margin="8,0,0,0" MinWidth="88" />
+            <Button x:Name="CancelButton" Grid.Column="1" Content="取消" Style="{StaticResource SecondaryButton}"
+                    Click="Cancel_Click" MinWidth="88" IsCancel="True" />
+            <Button x:Name="SaveButton" Grid.Column="2" Content="保存" Style="{StaticResource PrimaryButton}"
+                    Click="Save_Click" Margin="8,0,0,0" MinWidth="88" IsDefault="True" />
         </Grid>
     </Grid>
 </Window>

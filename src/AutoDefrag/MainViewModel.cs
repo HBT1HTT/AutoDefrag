@@ -191,9 +191,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (DiskService.IsLargeCluster(clusterBytes))
             {
                 var effective = EngineResolver.Effective(_config.EngineMode, clusterBytes);
+                var ssdOptimize = _config.SsdOptimizeOnly && DiskService.GetMediaKind(drive) == DiskMediaKind.Ssd;
                 toolTip = effective == "System"
                     ? $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），Windows 自带的整理对它无效，选中后会被跳过并提示原因。"
-                    : $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），会用本程序重写文件来整理，逐个处理、可随时停止。";
+                    : ssdOptimize
+                        ? $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），且是固态硬盘：默认只做系统优化，不重写文件（可在设置里关闭）。"
+                        : $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），会用本程序重写文件来整理，逐个处理、可随时停止。";
             }
 
             Disks.Add(new DiskItem(
@@ -237,9 +240,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
             var effective = EngineResolver.Effective(_config.EngineMode, clusterBytes);
             var auto = _config.EngineMode == EngineResolver.Auto ? "自动判断为" : string.Empty;
+            var info = DiskService.GetFixedDrives()
+                .FirstOrDefault(d => string.Equals(DiskService.Letter(d), disk.Letter, StringComparison.OrdinalIgnoreCase));
+            var ssdOptimize = _config.SsdOptimizeOnly && info is not null &&
+                              DiskService.GetMediaKind(info) == DiskMediaKind.Ssd;
             notes.Add(effective == "System"
                 ? $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），{auto}Windows 自带整理对它无效，会自动跳过并写日志"
-                : $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），{auto}用本程序重写文件来整理");
+                : ssdOptimize
+                    ? $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），{auto}固态硬盘默认只做系统优化、不重写文件"
+                    : $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），{auto}用本程序重写文件来整理");
         }
 
         _largeClusterHint = notes.Count > 0 ? string.Join("；", notes) + "。" : string.Empty;
@@ -588,6 +597,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
             ? $"只整理碎片率 ≥ {_config.FragThresholdPercent}% 的文件"
             : "全部整理";
 
+    /// <summary>设置窗口读取的整理偏好快照（含三档预设与高级参数）。</summary>
+    public DefragPreferences DefragPreferences => _config.GetDefragPreferences();
+
+    /// <summary>设置窗口点“保存”时一次性写回；写盘后立即通知相关只读属性刷新。</summary>
+    public void ApplyDefragSettings(DefragPreferences prefs)
+    {
+        _config.ApplyDefragPreferences(prefs);
+        _store.Save(_config);
+        RefreshDisks();
+        Logger.Info($"整理设置已保存: 质量={_config.DefragQuality}, 最小文件={_config.MinFileSizeKB}KB, " +
+                    $"单轮≤{_config.MaxFilesPerRun}文件/{_config.MaxBytesPerRunGB}GB, 可回收≥{_config.MinReclaimMB}MB, " +
+                    $"校验={_config.VerifyMode}, 最多{_config.MaxRounds}轮/{_config.MaxRunMinutes}分钟, " +
+                    $"碎片率阈值={(FragThresholdEnabled ? $"≥{FragThresholdPercent}%" : "关闭")}, 固态只优化={_config.SsdOptimizeOnly}");
+        OnPropertyChanged(nameof(FragThresholdEnabled));
+        OnPropertyChanged(nameof(FragThresholdPercent));
+        OnPropertyChanged(nameof(FragThresholdText));
+        OnPropertyChanged(nameof(LargeClusterHint));
+        OnPropertyChanged(nameof(LargeClusterHintVisibility));
+    }
+
     public bool IsBusy
     {
         get => _isBusy;
@@ -738,8 +767,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
+        // 自动整理也要尊重用户在磁盘列表里的勾选；首次启动未配置时才回退为全部固定磁盘
+        var present = DiskService.GetFixedDrives().Select(DiskService.Letter).ToList();
+        var selected = _config.SelectedDrives ?? present;
         var drives = auto
-            ? DiskService.GetFixedDrives().Select(DiskService.Letter).ToList()
+            ? present.Where(letter => selected.Any(s => string.Equals(s, letter, StringComparison.OrdinalIgnoreCase))).ToList()
             : Disks.Where(d => d.IsSelected).Select(d => d.Letter).ToList();
 
         if (drives.Count == 0)
@@ -751,8 +783,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
+        var prefs = _config.GetDefragPreferences();
         if (!_worker.Start("clean", drives.ToArray(), _config.CpuThreshold, auto, out var error, _config.EngineMode,
-                _config.FragThresholdEnabled ? _config.FragThresholdPercent : 0))
+                _config.FragThresholdEnabled ? _config.FragThresholdPercent : 0, prefs))
         {
             StatusText = "空闲";
             FooterHint = error ?? "无法开始整理";
@@ -761,11 +794,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
+        var qualityName = DefragQualityPresets.Match(prefs)?.Name
+                          ?? (prefs.Quality == DefragQualityPresets.Custom ? "自定义" : DefragQualityPresets.Get(prefs.Quality).Name);
         IsBusy = true;
         StatusText = auto ? "自动整理中" : "正在整理";
-        FooterHint = $"正在整理 {string.Join("、", drives)}（{EngineModeText}）· " +
+        FooterHint = $"正在整理 {string.Join("、", drives)}（{EngineModeText}，质量={qualityName}）· " +
                      (_config.FragThresholdEnabled ? $"仅整理碎片率 ≥ {_config.FragThresholdPercent}% 的文件 · " : "全部整理 · ") +
-                     $"CPU 连续 10 秒高于 {_config.CpuThreshold}% 时暂停，回落后自动继续";
+                     $"预计最多 {prefs.MaxRounds} 轮 · CPU 连续 10 秒高于 {_config.CpuThreshold}% 时暂停，回落后自动继续";
         BeginProgress($"正在准备整理 {string.Join("、", drives)}");
     }
 
@@ -992,6 +1027,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
             stage += " · " + state.Phase;
         if (stage.Length > 0) parts.Add(stage);
 
+        if (state.RoundTotal > 0 && state.Round > 0)
+            parts.Add($"第 {state.Round}/{state.RoundTotal} 轮");
+
+        if (state.CoveragePercent > 0)
+            parts.Add($"覆盖率 {state.CoveragePercent:0.#}%（仅已分析文件）");
+
         if (state.FileTotal > 0) parts.Add($"文件 {state.FileIndex}/{state.FileTotal}");
         if (state.CurrentFile.Length > 0) parts.Add(state.CurrentFile);
 
@@ -1019,6 +1060,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
             {
                 NotificationRequested?.Invoke("AutoDefrag",
                     "已有另一个整理/预览任务正在运行，本次没有启动", NotifyLevel.Warning);
+            }
+            OnPropertyChanged(nameof(NextRunText));
+            return;
+        }
+
+        // exit=4：用户主动停止，已完成的整理效果保留，不能按“成功/部分失败”文案展示
+        if (exitCode == 4)
+        {
+            if (string.Equals(mode, "clean", StringComparison.OrdinalIgnoreCase))
+            {
+                RefreshLastResult();
+                StatusText = "已停止";
+                FooterHint = "已按请求停止：已完成的整理效果保留，未完成的部分下次整理会继续";
+                FinishProgress("整理已停止");
+                NotificationRequested?.Invoke("AutoDefrag",
+                    auto ? "自动整理已按请求停止" : "磁盘整理已停止（已完成的部分保留）", NotifyLevel.Info);
+            }
+            else
+            {
+                RefreshDisks();
+                StatusText = "空闲";
+                FooterHint = "碎片检查已停止";
+                FinishProgress("碎片检查已停止");
             }
             OnPropertyChanged(nameof(NextRunText));
             return;

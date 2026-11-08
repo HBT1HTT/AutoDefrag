@@ -32,8 +32,19 @@ public static class AutoStartService
             }
             else if (current is not null)
             {
-                key.DeleteValue(ValueName, throwOnMissingValue: false);
-                Logger.Info("已关闭开机自启（已移除 Run 键）");
+                // 只清理指向本副本的旧值。Run 键是整机共享的，若指向其他目录的 AutoDefrag
+                // （另一份便携版/已安装版），删除会误关别人的开机自启。
+                if (string.Equals(current, ExpectedValue, StringComparison.OrdinalIgnoreCase) ||
+                    current.StartsWith($"\"{AppPaths.ExePath}\"", StringComparison.OrdinalIgnoreCase) ||
+                    current.StartsWith(AppPaths.ExePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    key.DeleteValue(ValueName, throwOnMissingValue: false);
+                    Logger.Info("已关闭开机自启（已移除指向本程序的 Run 键）");
+                }
+                else
+                {
+                    Logger.Info($"Run 键中的开机自启项 AutoDefrag 指向其他副本（{current}），未改动；如需关闭请在该副本的设置里操作");
+                }
             }
 
             return true;

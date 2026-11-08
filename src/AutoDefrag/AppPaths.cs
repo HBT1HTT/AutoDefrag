@@ -54,10 +54,17 @@ public static class AppPaths
             Directory.CreateDirectory(data);
             Directory.CreateDirectory(logs);
 
-            // 真正验证可写，避免"目录能建但文件写不进"的半可写场景
-            var probe = Path.Combine(data, ".write-test");
-            File.WriteAllText(probe, "ok");
-            File.Delete(probe);
+            // 真正验证可写，避免"目录能建但文件写不进"的半可写场景。
+            // 探测文件带进程号：主界面与 worker 可能同时启动，固定文件名会互相删掉导致误判为不可写。
+            var probe = Path.Combine(data, $".write-test.{Environment.ProcessId}");
+            try
+            {
+                File.WriteAllText(probe, "ok");
+            }
+            finally
+            {
+                try { File.Delete(probe); } catch { /* 清理失败不影响结论 */ }
+            }
             return ExeDir;
         }
         catch

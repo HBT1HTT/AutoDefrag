@@ -18,6 +18,15 @@ public static class TaskGate
     public static bool TryEnter(out string? error, int timeoutMs = 0)
     {
         error = null;
+
+        // 同一进程内已经持有时直接拒绝：Mutex 对同一线程是可重入的，
+        // 否则嵌套调用会覆盖 _held，导致第一次的句柄泄漏、IsBusy 也会误报“空闲”。
+        if (_held is not null)
+        {
+            error = "已有另一个整理/检查/预览任务正在运行";
+            return false;
+        }
+
         try
         {
             var mutex = new Mutex(false, MutexName);
