@@ -41,6 +41,14 @@ public static class WorkerHost
                 Logger.Warn($"忽略 {requestedDrives.Length - drives.Length} 个非法磁盘参数（只接受 A: 形式的盘符）");
             }
 
+            // 明确传了磁盘参数但全部非法时，必须拒绝执行；
+            // 不能把空列表当成“未指定磁盘”，否则会退化成对全部固定磁盘执行。
+            if (requestedDrives.Length > 0 && drives.Length == 0)
+            {
+                Logger.Error("磁盘参数全部无效，拒绝执行（空列表不代表全部磁盘）");
+                return 2;
+            }
+
             var threshold = 70;
             var thresholdText = GetValue(args, "--threshold");
             if (thresholdText is not null &&

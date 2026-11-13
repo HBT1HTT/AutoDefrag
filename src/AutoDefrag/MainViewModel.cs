@@ -1135,8 +1135,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             RefreshDisks();
             StatusText = "空闲";
-            FooterHint = "磁盘信息已更新";
-            FinishProgress("磁盘碎片检查完成");
+            FooterHint = ok ? "磁盘信息已更新" : "部分磁盘未能读取碎片信息，详情见日志";
+            FinishProgress(ok ? "磁盘碎片检查完成" : "碎片检查有磁盘读取失败");
         }
 
         OnPropertyChanged(nameof(NextRunText));

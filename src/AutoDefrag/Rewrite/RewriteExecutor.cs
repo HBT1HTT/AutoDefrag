@@ -260,6 +260,14 @@ public static class RewriteExecutor
         catch (Exception ex)
         {
             Logger.Error($"[重写] 异常 {path}: {ex.Message}");
+            // 如果已经进入替换阶段，backup 里是原文件：优先回滚，绝不能把备份删掉后
+            // 只报“失败”，让用户既不知道文件已被替换、也失去了恢复手段。
+            if (File.Exists(backupPath))
+            {
+                Logger.Warn($"[重写] 异常发生在替换阶段，尝试用备份回滚: {path}");
+                return Rollback(result, path, backupPath, "异常: " + ex.Message, started, beforeLayout, beforeExtents);
+            }
+
             Cleanup(tempPath, backupPath);
             return Fail(result, "异常: " + ex.Message, started, NtfsNative.ExtentsText(beforeExtents), beforeLayout);
         }

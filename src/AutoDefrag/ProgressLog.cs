@@ -65,13 +65,18 @@ public static class ProgressLog
             var text = reader.ReadToEnd();
             var end = stream.Position;
 
-            if (text.Length > 0)
+            // 只消费到最后一个换行符：worker 可能正在写某一行，半行留到下次读取，
+            // 否则这一行会被截断显示，后半段再变成一条新日志。
+            var lastBreak = text.LastIndexOf('\n');
+            if (lastBreak < 0) return (lines, offset);
+
+            var tailBytes = Encoding.UTF8.GetByteCount(text[(lastBreak + 1)..]);
+            end = Math.Max(offset, stream.Position - tailBytes);
+
+            var parts = text[..(lastBreak + 1)].Replace("\r\n", "\n").Split('\n');
+            foreach (var part in parts)
             {
-                var parts = text.Replace("\r\n", "\n").Split('\n');
-                foreach (var part in parts)
-                {
-                    if (part.Length > 0) lines.Add(part);
-                }
+                if (part.Length > 0) lines.Add(part);
             }
 
             return (lines, end);

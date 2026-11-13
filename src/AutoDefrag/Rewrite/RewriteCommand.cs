@@ -57,7 +57,6 @@ public static class RewriteCommand
     public static int RunDrives(IReadOnlyList<string> drives, bool dryRun, bool quiet, string? scanRoot = null)
     {
         AppPaths.Ensure();
-        ProgressLog.Begin();
 
         // 任务级互斥：整理 worker 或另一实例的预览正在运行时，绝不再并发操作卷
         if (!TaskGate.TryEnter(out var gateError))
@@ -73,6 +72,8 @@ public static class RewriteCommand
             return 3;
         }
 
+        // 拿到任务锁之后才清空进度日志：否则并发预览会把正在运行任务的进度记录截断
+        ProgressLog.Begin();
         try
         {
             return RunDrivesCore(drives, dryRun, quiet, scanRoot);

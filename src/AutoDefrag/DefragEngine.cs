@@ -443,7 +443,16 @@ public static class DefragEngine
 
         // 停止标记只对“本次检查”有效；检查结束即清理，避免残留影响下一次整理
         ClearStopFlag();
-        return stopped ? 4 : 0;
+        if (stopped) return 4;
+
+        var unreadable = file.Drives.Count(d => !d.Probed);
+        if (unreadable > 0)
+        {
+            Logger.Warn($"碎片检查结束：{unreadable}/{file.Drives.Count} 块磁盘读取失败（结果按“未知”记录，不报成功）");
+            return 1;
+        }
+
+        return 0;
     }
 
     /// <summary>

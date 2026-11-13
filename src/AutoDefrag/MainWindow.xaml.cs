@@ -183,7 +183,7 @@ public partial class MainWindow : Window
             TextAlignment = TextAlignment.Left
         };
 
-        var lines = text.Length == 0 ? Array.Empty<string>() : text.Split('\n');
+        var lines = string.IsNullOrEmpty(text) ? Array.Empty<string>() : text.Split('\n');
         if (lines.Length == 0)
         {
             document.Blocks.Add(new Paragraph(new Run("（暂无运行日志）"))
