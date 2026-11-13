@@ -527,6 +527,21 @@
                                           VerticalAlignment="Center" />
                         </Grid>
 
+                        <Grid Margin="0,0,0,14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="整理完成提示音" FontSize="13.5" />
+                                <TextBlock Text="整理任务真正完成时播放约 1 秒的轻提示音；失败、被停止时不播放"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ToggleButton Grid.Column="1" Style="{StaticResource ToggleSwitch}"
+                                          IsChecked="{Binding CompletionSound, Mode=TwoWay}"
+                                          VerticalAlignment="Center" />
+                        </Grid>
+
                         <Grid Margin="0,0,0,4">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />

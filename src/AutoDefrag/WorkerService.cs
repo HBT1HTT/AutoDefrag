@@ -137,6 +137,9 @@ public sealed class WorkerService
             // 检查磁盘也要跑 defrag /A 预检，同样需要 CPU 守护阈值
             sb.Append(" --threshold ").Append(Math.Clamp(threshold, 10, 100));
         }
+
+        // 数据目录由主进程指定：提权到另一个管理员账户时也能读写同一份状态/停止标记/结果
+        sb.Append(" --datadir \"").Append(AppPaths.Root).Append('"');
         return sb.ToString();
     }
 

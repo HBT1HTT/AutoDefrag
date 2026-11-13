@@ -28,6 +28,16 @@
     <SolidColorBrush x:Key="Danger" Color="#C42B1C" />
     <SolidColorBrush x:Key="Success" Color="#0F7B0F" />
 
+    <!-- 进度日志区：跟随主题的“代码表面”，不用纯黑；文字按语义分层着色 -->
+    <SolidColorBrush x:Key="LogSurface" Color="#F7F8FA" />
+    <SolidColorBrush x:Key="LogBorder" Color="#E3E6EA" />
+    <SolidColorBrush x:Key="LogText" Color="#2B2B2B" />
+    <SolidColorBrush x:Key="LogTimestamp" Color="#8B9099" />
+    <SolidColorBrush x:Key="LogInfo" Color="#0B62C4" />
+    <SolidColorBrush x:Key="LogWarn" Color="#8A5A00" />
+    <SolidColorBrush x:Key="LogError" Color="#B3261E" />
+    <SolidColorBrush x:Key="LogOk" Color="#0F7B0F" />
+
     <!-- ================= 文本 ================= -->
     <Style x:Key="WindowTitle" TargetType="TextBlock">
         <Setter Property="FontFamily" Value="{DynamicResource AppDisplayFont}" />

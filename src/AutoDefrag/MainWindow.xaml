@@ -28,7 +28,7 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <Image Source="pack://application:,,,/Assets/icon-256.png"
+            <Image Source="pack://application:,,,/AutoDefrag;component/Assets/icon-256.png"
                    Width="26" Height="26" Stretch="Uniform"
                    RenderOptions.BitmapScalingMode="HighQuality"
                    VerticalAlignment="Center" />
@@ -199,18 +199,23 @@
                     <TextBlock Text="{Binding ProgressDetail}" Style="{StaticResource HintText}"
                                TextWrapping="Wrap" Margin="26,4,0,8" />
 
-                    <Border Background="#0C0C0C" CornerRadius="6" Height="148">
-                        <TextBox x:Name="ProgressLogBox"
-                                 IsReadOnly="True" IsTabStop="False" Focusable="False"
-                                 FontFamily="Cascadia Mono, Consolas, Microsoft YaHei UI"
-                                 FontSize="11.5"
-                                 Background="Transparent" Foreground="#D6D6D6"
-                                 BorderThickness="0" Padding="8,6"
-                                 Text="{Binding ProgressLogText, Mode=OneWay}"
-                                 VerticalScrollBarVisibility="Auto"
-                                 HorizontalScrollBarVisibility="Auto"
-                                 TextWrapping="NoWrap"
-                                 TextChanged="ProgressLog_TextChanged" />
+                    <!-- 日志表面跟随主题（不再是纯黑），正文等宽；着色只发生在渲染层，日志文本与文件格式不变 -->
+                    <Border Background="{DynamicResource LogSurface}"
+                            BorderBrush="{DynamicResource LogBorder}" BorderThickness="1"
+                            CornerRadius="8" Height="148">
+                        <RichTextBox x:Name="ProgressLogBox"
+                                     IsReadOnly="True" IsReadOnlyCaretVisible="False"
+                                     IsUndoEnabled="False" IsTabStop="False" Focusable="False"
+                                     FontFamily="Cascadia Mono, Consolas, Microsoft YaHei UI"
+                                     FontSize="11.5"
+                                     Background="Transparent" Foreground="{DynamicResource LogText}"
+                                     BorderThickness="0" Padding="8,6"
+                                     VerticalScrollBarVisibility="Auto"
+                                     HorizontalScrollBarVisibility="Auto"
+                                     SelectionBrush="{DynamicResource AccentBorder}"
+                                     SelectionOpacity="0.55"
+                                     SpellCheck.IsEnabled="False"
+                                     TextOptions.TextFormattingMode="Ideal" />
                     </Border>
                 </StackPanel>
             </Border>

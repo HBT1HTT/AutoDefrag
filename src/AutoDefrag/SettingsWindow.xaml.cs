@@ -3,7 +3,6 @@ using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Input;
-using System.Windows.Media.Imaging;
 
 namespace AutoDefrag;
 
@@ -22,6 +21,7 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
     private bool _runAtStartup;
     private bool _autoStart;
     private bool _minimizeToTray;
+    private bool _completionSound;
     private double _cpuThreshold;
     private string _timeText;
     private string _selectedFont;
@@ -58,6 +58,7 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         _timeText = _vm.TimeText;
         _autoStart = _vm.AutoStart;
         _minimizeToTray = _vm.MinimizeToTray;
+        _completionSound = _vm.CompletionSound;
         _cpuThreshold = _vm.CpuThreshold;
         _selectedFont = _vm.SelectedFont;
         _themeMode = _vm.ThemeMode;
@@ -129,16 +130,11 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
                 break;
         }
 
-        try
+        SourceInitialized += (_, _) =>
         {
-            Icon = new BitmapImage(new Uri("pack://application:,,,/Assets/icon-256.png"));
-        }
-        catch
-        {
-            // 图标加载失败不影响功能
-        }
-
-        SourceInitialized += (_, _) => ThemeService.ApplyTitleBar(this);
+            ThemeService.ApplyTitleBar(this);
+            WindowIcon.Apply(this);
+        };
     }
 
     // ---------------------------------------------------------------- 草稿字段
@@ -223,6 +219,12 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
     {
         get => _minimizeToTray;
         set => SetField(ref _minimizeToTray, value);
+    }
+
+    public bool CompletionSound
+    {
+        get => _completionSound;
+        set => SetField(ref _completionSound, value);
     }
 
     public double CpuThreshold
@@ -676,6 +678,7 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         _vm.CpuThreshold = _cpuThreshold;
         _vm.AutoStart = _autoStart;
         _vm.MinimizeToTray = _minimizeToTray;
+        _vm.CompletionSound = _completionSound;
         _vm.SelectedFont = _selectedFont;
         _vm.SetTheme(_themeMode);
         _vm.EngineMode = _engineMode;

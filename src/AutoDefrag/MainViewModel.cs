@@ -35,6 +35,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly IReadOnlyList<string> _fontNames;
     private string _selectedFont;
     private string _largeClusterHint = string.Empty;
+    private bool _locationWarningShown;
 
     // 主界面底部进度区
     private bool _previewing;
@@ -47,6 +48,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly ObservableCollection<string> _progressLines = new();
     private long _progressOffset;
     private const int ProgressLogMaxLines = 200;
+    private bool _completionSoundPlayed;
 
     public MainViewModel(AppConfig config, ConfigStore store)
     {
@@ -314,10 +316,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         if (_isBusy) return;
 
-        _footerHint = SelectedCount > 0
+        var summary = SelectedCount > 0
             ? $"已选 {SelectedCount} 块磁盘 · 机械硬盘会深度整理，固态硬盘只做优化 · 开始时会请求管理员权限"
             : "还没有选磁盘 · 勾选后就可以开始整理";
+
+        // 数据目录降级（%LocalAppData% 不可写）必须让用户看到，不能只写在日志里
+        _footerHint = AppPaths.LocationWarning.Length > 0
+            ? AppPaths.LocationWarning
+            : summary;
         OnPropertyChanged(nameof(FooterHint));
+        if (AppPaths.LocationWarning.Length > 0 && !_locationWarningShown)
+        {
+            _locationWarningShown = true;
+            NotificationRequested?.Invoke("AutoDefrag", AppPaths.LocationWarning, NotifyLevel.Warning);
+        }
     }
 
     // ---------------------------------------------------------------- 设置项（即时保存）
@@ -428,6 +440,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _config.MinimizeToTray = value;
             _store.Save(_config);
             Logger.Info(value ? "关闭窗口时最小化到托盘" : "关闭窗口时退出程序");
+            OnPropertyChanged();
+        }
+    }
+
+    /// <summary>整理完成时播放提示音（默认开启；失败或被停止时不播放）。</summary>
+    public bool CompletionSound
+    {
+        get => _config.CompletionSound;
+        set
+        {
+            if (_config.CompletionSound == value) return;
+            _config.CompletionSound = value;
+            _store.Save(_config);
+            Logger.Info("整理完成提示音已" + (value ? "开启" : "关闭"));
             OnPropertyChanged();
         }
     }
@@ -721,6 +747,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _progressLogText = string.Empty;
         _progressOffset = 0;
         _stopping = false;
+        _completionSoundPlayed = false;
         SetProgress(title, string.Empty, -1);
         OnPropertyChanged(nameof(ProgressLogText));
     }
@@ -919,8 +946,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     StatusText = "空闲";
                     FooterHint = "预览完成：只读分析，没有改动任何文件";
                     FinishProgress("预览完成（未改动任何文件）");
-                    NotificationRequested?.Invoke("AutoDefrag", "预览完成，报告已写入 Data/rewrite_preview.txt",
-                        NotifyLevel.Info);
+                    NotificationRequested?.Invoke("AutoDefrag",
+                        "预览完成，报告已写入 " + AppPaths.RewritePreviewFile, NotifyLevel.Info);
                 }));
             }
         });
@@ -1099,6 +1126,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 ? (auto ? "今天的自动整理已完成" : "磁盘整理已完成")
                 : (auto ? "今天的自动整理结束，有磁盘没能完成" : "整理结束，有磁盘没能完成");
             NotificationRequested?.Invoke("AutoDefrag", message, ok ? NotifyLevel.Info : NotifyLevel.Warning);
+
+            // 只有真正成功完成才响；失败、被停止（exit=4）在上面已经返回，不会走到这里
+            if (ok) PlayCompletionSoundOnce();
         }
         else
         {
@@ -1109,6 +1139,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         OnPropertyChanged(nameof(NextRunText));
+    }
+
+    /// <summary>一次任务最多响一次，避免 watcher 与完成回调同时到达时重复播放。</summary>
+    private void PlayCompletionSoundOnce()
+    {
+        if (_completionSoundPlayed) return;
+        _completionSoundPlayed = true;
+
+        if (!_config.CompletionSound)
+        {
+            Logger.Info("完成提示音已跳过：设置已关闭");
+            return;
+        }
+
+        // 属性与本类同名的静态类，需要写全名避免解析成 bool 属性
+        AutoDefrag.CompletionSound.Play();
     }
 
     private void OnPropertyChanged([CallerMemberName] string? name = null) =>

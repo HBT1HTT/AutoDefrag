@@ -37,6 +37,9 @@ public partial class App : System.Windows.Application
         // 提权 worker：同一个 exe 的另一身份，不创建托盘、不参与单实例判断
         if (WorkerHost.IsWorkerRequest(e.Args))
         {
+            // 提权可能切换到另一个管理员账户，%LocalAppData% 会变成别人的；
+            // 使用主进程传入的数据目录，保证进度/状态/停止标记写在同一个地方
+            AppPaths.ApplyRootOverride(e.Args);
             StartWorker(e.Args);
             return;
         }
@@ -52,6 +55,10 @@ public partial class App : System.Windows.Application
         AppPaths.Ensure();
         Logger.Init("app");
         ToolTipGuard.Initialize();
+
+        // 数据目录异常（降级到临时目录/exe 同目录）和旧数据迁移结果都要留下可读记录，不能静默
+        if (AppPaths.LocationWarning.Length > 0) Logger.Warn(AppPaths.LocationWarning);
+        if (AppPaths.MigrationNote.Length > 0) Logger.Info(AppPaths.MigrationNote);
 
         var silent = e.Args.Any(a => string.Equals(a, "--tray", StringComparison.OrdinalIgnoreCase));
         WriteStartupBanner(silent);
@@ -266,7 +273,7 @@ public partial class App : System.Windows.Application
     {
         try
         {
-            var info = GetResourceStream(new Uri("pack://application:,,,/Assets/AutoDefrag.ico"));
+            var info = GetResourceStream(new Uri("pack://application:,,,/AutoDefrag;component/Assets/AutoDefrag.ico"));
             if (info?.Stream is null) return null;
             using var stream = info.Stream;
             return new Drawing.Icon(stream);

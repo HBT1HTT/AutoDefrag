@@ -198,7 +198,7 @@ public static class RewriteReport
                       $"总时长上限={(plan.Options.MaxRunMinutes <= 0 ? "不限" : $"{plan.Options.MaxRunMinutes} 分钟")}");
         sb.AppendLine("碎片率口径: 只统计本次实际分析到的文件（覆盖率见上方），不代表整卷碎片率；" +
                       "系统文件/MFT/空闲空间布局不在本报告口径内。");
-        sb.AppendLine("停止方式: 创建 Data\\rewrite_stop.flag，当前文件做完后停止继续（已完成的文件不会回滚）。");
+        sb.AppendLine("停止方式: 在运行数据目录创建 rewrite_stop.flag（默认 %LocalAppData%\\AutoDefrag\\Data），当前文件做完后停止继续（已完成的文件不会回滚）。");
         sb.AppendLine("================================================================");
     }
 

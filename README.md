@@ -2,9 +2,34 @@
 
 Windows 本地固定磁盘定期碎片整理工具的桌面版（WPF + .NET 10），单文件绿色版，目标机无需安装 .NET 运行时。
 
-- 版本：**v1.6.0**（稳定版）
+- 版本：**v1.8.0**（稳定版）
 - 发布形态：`win-x64` 自包含单文件（压缩），已嵌入图标
 - 可执行文件：`publish/AutoDefrag.exe`
+
+## 1.8.0：现代日志面板 + 拟物硬盘图标 + 完成提示音
+
+- **进度日志面板重做**：去掉纯黑底，改用跟随深浅主题的表面色（浅色 `#F7F8FA` / 深色 `#232323`），保留等宽字体；
+  时间戳弱化，警告/错误/暂停/恢复/完成按语义着色。只做渲染层着色，`ProgressLogText` 与 `progress.log` 内容、格式不变；
+  收起/展开、展开状态持久化、自动滚到底、最近 200 行、双向滚动、只读全部保持。
+- **新图标**：拟物风 3.5 寸硬盘（金属盘体、盘片、磁头臂、指示灯、螺丝），16/20/24/32/40/48/64/96/128/256 共 10 帧，
+  每个尺寸单独绘制而非缩放；exe、窗口标题栏/任务栏、托盘统一使用，16px 下仍能辨认。
+  生成脚本仍是 `tools/make-icon.ps1`。预览见 `docs/previews/1.8.0/`。
+- **整理完成提示音**：代码合成的约 0.95 秒上行双音（E5→B5，44.1kHz/16bit，淡入淡出），运行时以内存 WAV 播放，
+  不落盘、无第三方音频文件；默认开启，设置 →「常规 → 整理完成提示音」可关闭；
+  仅任务真正成功完成时响一次，失败/被停止不响；静音或无音频设备只记“已跳过”。
+- **配置 v7**：新增 `CompletionSound`，旧配置缺字段时默认开启，v5/v6 均可直接升级。
+- 详见 [RELEASE_NOTES.md](RELEASE_NOTES.md) 的 1.8.0 段。
+
+## 1.7.0：运行数据迁到 %LocalAppData%，exe 可以单独放
+
+- 桌面/任意目录只放 `AutoDefrag.exe` 即可，不会再生成 `Data`、`Logs` 等文件夹；
+  配置、日志、状态、报告、停止标记全部在 `%LocalAppData%\AutoDefrag`。
+- 从 1.6.0 及更早版本首次启动时自动迁移 exe 同目录的旧 `Data`/`Logs`，
+  保留引擎方式、整理质量、CPU 阈值、勾选磁盘、调度、主题、字体、进度区展开状态等原有设置，
+  迁移完成后清理旧目录并写日志；单个文件迁移失败只保留旧文件，不覆盖新数据、不崩溃。
+- `%LocalAppData%` 不可写时明确降级：先用户临时目录，再回退 exe 同目录；底部状态行 + 托盘通知 + 日志三处提示。
+- 提权 worker 由主进程传入 `--datadir`，即使 UAC 换到另一个管理员账户，进度/停止标记/结果仍写在同一位置。
+- 详见 [RELEASE_NOTES.md](RELEASE_NOTES.md) 的 1.7.0 段（含迁移规则与实测证据）。
 
 ## 1.6.0：全局 ToolTip 生命周期 + 全量界面/逻辑审查
 
@@ -178,13 +203,13 @@ Windows 自带的 `defrag.exe` 在 64KB/128KB 簇卷上基本无效（`/A` 返�
   - 超大存储块（> 4KB）的卷看不到实际整理过程 → `可能不支持`；
   - 机械硬盘读不到碎片情况、又看不到实际整理过程 → `无法确认`；
   - 其余才记为 `成功`。
-  - 结果写入 `Data/last_result.txt`，含每块盘的状态、退出码、暂停/继续次数、整理前后碎片率。
+  - 结果写入 `%LocalAppData%\AutoDefrag\Data\last_result.txt`，含每块盘的状态、退出码、暂停/继续次数、整理前后碎片率。
 - **CPU 守护**：采样**整机** CPU（`GetSystemTimes`，每秒一次，与任务管理器同源）。整机占用连续 10 秒高于阈值时暂停读写：系统方式挂起 `defrag.exe`；文件级重写方式在**分析/枚举、复制、校验、替换、复核**各阶段原地等待，回落到阈值以下并稳定 10 秒后自动继续。触发/恢复都写日志（实测值、阈值、阶段、次数），并记录到 `worker_state.json`/`last_result.txt`。阈值可在设置里调整（默认 70%，范围 10–100%）；阈值应高于平时的后台占用，否则会长时间暂停。
 - **每日调度**：可设置每天几点整理（24 小时制，如 `03:00`）；也支持“当天还没整理的话，启动后自动整理一次”。执行完成后写入当日锁，同一天不会重复自动整理。
 - **托盘常驻**：关闭窗口默认最小化到托盘。托盘菜单：打开主界面、设置…、立即整理、暂停/恢复自动整理、查看日志、退出；菜单文字随状态实时更新。
 - **外观**：跟随系统的浅色/深色主题，也可手动指定；支持选择界面字体（列系统已安装字体，选中立即生效并保存）。
 - **开机自启**：写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`（值名 `AutoDefrag`），指向当前 exe，带 `--tray` 参数静默启动。
-- **日志与结果**：`Logs/app.log`（主进程）、`Logs/engine.log`（后台任务）、`Data/last_result.txt`、`Data/worker_state.json`、`Data/drive_status.json` 均可用于排查。
+- **日志与结果**：运行数据目录（`%LocalAppData%\AutoDefrag`）下的 `Logs/app.log`（主进程）、`Logs/engine.log`（后台任务）、`Data/last_result.txt`、`Data/worker_state.json`、`Data/drive_status.json` 均可用于排查。
 
 ## 使用
 
@@ -194,8 +219,8 @@ Windows 自带的 `defrag.exe` 在 64KB/128KB 簇卷上基本无效（`/A` 返�
 4. 关闭窗口默认最小化到托盘；需要彻底退出时用托盘菜单的“退出”。
 5. 右上角“设置”可调整：界面字体、界面主题、**整理方式（本程序 / Windows 自带 / 自动）**、
    **整理设置（整理质量三档 / 碎片率阈值 / 单轮与多轮参数 / 校验方式 / SSD 只优化）**、
-   每天自动整理、当天首次启动补跑、每天几点、开机自启、关闭窗口最小化到托盘、CPU 占用上限。保存后立即生效。
-6. 主界面底部进度区：小箭头展开可看实时日志与阶段/文件/速度；收起状态与展开状态都会被记住。
+   每天自动整理、当天首次启动补跑、每天几点、开机自启、关闭窗口最小化到托盘、整理完成提示音、CPU 占用上限。保存后立即生效。
+6. 主界面底部进度区：小箭头展开可看实时日志与阶段/文件/速度；日志面板跟随深浅主题，时间戳弱化、警告/错误/暂停/恢复/完成按语义着色；收起状态与展开状态都会被记住。
 
 ### 预览整理（dry-run，不动磁盘）
 
@@ -216,9 +241,11 @@ AutoDefrag.exe --dry-run --path "A:\MyDir" --quiet   # 不弹结果对话框
 
 ### 数据与配置
 
-- 优先使用 exe 所在目录：`Data/config.json`、`Data/last_run.txt`、`Data/last_result.txt`、`Data/drive_status.json`、`Logs/app.log`、`Logs/engine.log`。
-- 若 exe 所在目录不可写（例如放在 `Program Files`），自动回退到 `%LocalAppData%\AutoDefrag`。
-- 旧版 PowerShell 版本的 `Data/config.json` 可直接读取；缺少的新字段使用默认值，原有值保留（当前 `ConfigVersion = 6`，启动时自动迁移 v5→v6）。
+- 运行数据固定在 `%LocalAppData%\AutoDefrag`：`Data/config.json`、`Data/last_run.txt`、`Data/last_result.txt`、`Data/drive_status.json`、`Data/worker_state.json`、`Data/progress.log`、重写报告与预览、停止标记，以及 `Logs/app.log`、`Logs/engine.log`。
+- **exe 同目录不再产生任何文件或目录**：可以把 `AutoDefrag.exe` 单独放到桌面/任意目录，旁边不会出现 `Data`、`Logs`。
+- 从旧版（≤1.6.0）升级：首次启动会把 exe 同目录原有的 `Data`/`Logs` 迁移到新位置（含引擎方式、整理质量、CPU 阈值、勾选磁盘、调度、主题、字体、进度区展开状态等），迁移完成后清理旧目录；迁移结果写日志。
+- 若 `%LocalAppData%` 不可写，会依次降级到用户临时目录、最后回退 exe 同目录；降级会写警告日志、在底部状态行提示并弹出托盘通知，不会静默失败。
+- 旧版 PowerShell 版本的 `Data/config.json` 可直接读取；缺少的新字段使用默认值，原有值保留（当前 `ConfigVersion = 7`，启动时自动迁移 v5/v6→v7）。
 
 ### 命令行（内部使用）
 
@@ -237,7 +264,7 @@ AutoDefrag.exe --worker status
 dotnet publish -c Release src/AutoDefrag/AutoDefrag.csproj -o publish -p:EnableCompressionInSingleFile=true
 ```
 
-版本号来自 `src/AutoDefrag/AutoDefrag.csproj`（当前 `1.6.0`）。产物为 `publish/AutoDefrag.exe` 单文件，自包含、已嵌入图标，无 trimming。
+版本号来自 `src/AutoDefrag/AutoDefrag.csproj`（当前 `1.7.0`）。产物为 `publish/AutoDefrag.exe` 单文件，自包含、已嵌入图标，无 trimming。
 
 ## 注意事项与风险
 

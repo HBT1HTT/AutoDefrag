@@ -326,3 +326,26 @@
 - 125% DPI 实测：收起最小 360 高度、展开最小 540 高度，底部按钮均在可视区内，磁盘列表保留可见高度。
 - 待真机确认：100%/150% 缩放、极矮工作区、UAC 提权与真实盘整理。
 
+## 9. 1.7.0 实现记录（运行数据迁到 %LocalAppData%）
+
+- `AppPaths.Root` 固定为 `%LocalAppData%\AutoDefrag`；exe 同目录不再创建 `Data`/`Logs`。
+- 首次启动把旧版 exe 同目录 `Data`/`Logs` 逐文件迁移到新位置并清理旧目录：
+  目标缺失才复制；目标较旧则以旧位置为准并备份为 `.bak`；失败保留旧文件、继续其它文件、不抛异常。
+- 降级顺序：`%LocalAppData%` → `%TEMP%` → exe 同目录；降级写 WARN 日志 + 底部状态行 + 托盘通知。
+- 提权 worker 新增 `--datadir`（仅 worker 模式生效），保证 UAC 切换账户时状态/停止标记/结果仍在同一目录。
+- 验证：真实 exe 迁移后 exe 目录只剩 exe、新位置配置逐项保留；空目录运行仅 1 个文件；
+  产品代码自检 14 项 PASS（路径、生成配置、重新载入、`--datadir`）。
+
+## 10. 1.8.0 实现记录（日志面板 / 图标 / 完成提示音）
+
+- 日志面板：`RichTextBox` + `FlowDocument` 渲染，主题表面色 `LogSurface`/`LogBorder`，时间戳与语义分级着色
+  （`LogText/LogTimestamp/LogWarn/LogError/LogOk/LogInfo`）；只改渲染，日志文本与文件格式不变；
+  换主题时重建文档（`ThemeService.ThemeChanged`），窗口关闭解绑；最长行宽用 `FormattedText` 计算，保持不换行与双向滚动。
+- 图标：`tools/make-icon.ps1` 按尺寸单独绘制 10 帧 ICO（16…256），16/20 使用简化盘仓画法；
+  `WindowIcon` 通过 `ExtractIconEx(shell32)` + `WM_SETICON` 取原生 16/32px 帧，pack URI 改为程序集绝对路径。
+- 提示音：`CompletionSound` 运行时合成 44.1kHz/16bit 单声道 WAV（E5→B5，0.95s，淡入淡出，峰值约 -7.5dBFS），
+  `SoundPlayer` 异步播放；`AppConfig.CompletionSound`（默认 true，ConfigVersion 7），
+  设置「常规 → 整理完成提示音」；仅退出码 0 的整理任务播放一次，失败/停止不播放，静音或异常只记“已跳过”。
+- 体检修复：图标 P/Invoke DLL 写错、pack URI 入口程序集依赖、日志主题快照、报告/提示中的旧 `Data\` 文案。
+- 验证：v5→v7 / v6→v7 迁移、音效参数、深浅主题与设置截图、展开态底部按钮不裁切、单文件 worker 冒烟（含空格路径）。
+

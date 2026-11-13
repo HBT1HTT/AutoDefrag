@@ -9,7 +9,7 @@ namespace AutoDefrag;
 /// </summary>
 public sealed class AppConfig
 {
-    public int ConfigVersion { get; set; } = 6;
+    public int ConfigVersion { get; set; } = 7;
 
     /// <summary>CPU 守护阈值(%)：高于该值时挂起 defrag。</summary>
     public int CpuThreshold { get; set; } = 70;
@@ -101,6 +101,12 @@ public sealed class AppConfig
     /// 默认开启；机械硬盘不受影响。仅“本程序整理/自动（大簇盘）”路径读取该开关。
     /// </summary>
     public bool SsdOptimizeOnly { get; set; } = true;
+
+    /// <summary>
+    /// 整理任务真正完成时播放一段约 1 秒的提示音（失败、被停止时不播放）。
+    /// 默认开启；旧配置没有该字段时按开启处理。
+    /// </summary>
+    public bool CompletionSound { get; set; } = true;
 
     public static readonly Regex DailyTimeRegex =
         new(@"^(0|00:00|([01]\d|2[0-3]):[0-5]\d)$", RegexOptions.Compiled);

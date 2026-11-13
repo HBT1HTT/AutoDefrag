@@ -51,9 +51,24 @@ public static class ThemeService
         Set("Danger", IsDark ? 0xFFFF6B5F : 0xFFC42B1C);
         Set("Success", IsDark ? 0xFF6CCB5F : 0xFF0F7B0F);
 
+        // 进度日志区：深色用介于窗口与卡片之间的表面（不是纯黑），浅色用略偏冷的浅灰；文字着色保证对比度
+        Set("LogSurface", IsDark ? 0xFF232323 : 0xFFF7F8FA);
+        Set("LogBorder", IsDark ? 0xFF3A3A3A : 0xFFE3E6EA);
+        Set("LogText", IsDark ? 0xFFD8D8D8 : 0xFF2B2B2B);
+        Set("LogTimestamp", IsDark ? 0xFF8C8C8C : 0xFF8B9099);
+        Set("LogInfo", IsDark ? 0xFF79B8FF : 0xFF0B62C4);
+        Set("LogWarn", IsDark ? 0xFFE8B339 : 0xFF8A5A00);
+        Set("LogError", IsDark ? 0xFFFF8A80 : 0xFFB3261E);
+        Set("LogOk", IsDark ? 0xFF6CCB5F : 0xFF0F7B0F);
+
         foreach (Window window in WpfApplication.Current.Windows)
             ApplyTitleBar(window);
+
+        ThemeChanged?.Invoke();
     }
+
+    /// <summary>主题切换完成（用于需要重建视觉元素的地方，例如富文本日志的着色）。</summary>
+    public static event Action? ThemeChanged;
 
     public static void ApplyTitleBar(Window window)
     {
