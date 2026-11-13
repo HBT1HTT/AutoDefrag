@@ -131,9 +131,9 @@ internal static class ConfigMigrations
         note = null;
 
         var version = present.Contains("ConfigVersion") ? config.ConfigVersion : 5;
-        if (version > 7)
+        if (version > 8)
         {
-            note = $"配置 ConfigVersion={version} 高于当前支持的 7，无法识别的字段将被忽略";
+            note = $"配置 ConfigVersion={version} 高于当前支持的 8，无法识别的字段将被忽略";
             return false;
         }
 
@@ -169,6 +169,38 @@ internal static class ConfigMigrations
             config.ConfigVersion = 7;
             migrated = true;
             var extra = "配置已升级到 v7：新增「整理完成提示音」开关（默认开启）";
+            note = note is null ? extra : note + "；" + extra;
+        }
+
+        if (config.ConfigVersion < 8)
+        {
+            // v8：设置窗口精简，整理质量成为“最小文件/单轮上限/可回收下限/校验/轮次/时长”的唯一入口。
+            // 旧配置里的数值不丢：命名档位直接套用该档参数；旧“自定义”按数值距离映射到最接近的一档。
+            var oldPrefs = config.GetDefragPreferences().Normalized();
+            var target = DefragQualityPresets.IsValid(oldPrefs.Quality) && oldPrefs.Quality != DefragQualityPresets.Custom
+                ? DefragQualityPresets.Get(oldPrefs.Quality)
+                : DefragQualityPresets.Nearest(oldPrefs);
+
+            var mappedFromCustom = oldPrefs.Quality == DefragQualityPresets.Custom ||
+                                   !DefragQualityPresets.IsValid(oldPrefs.Quality);
+            config.DefragQuality = target.Key;
+            config.MinFileSizeKB = target.MinFileSizeKB;
+            config.MaxFilesPerRun = target.MaxFilesPerRun;
+            config.MaxBytesPerRunGB = target.MaxBytesPerRunGB;
+            config.MinReclaimMB = target.MinReclaimMB;
+            config.VerifyMode = target.VerifyMode;
+            config.MaxRounds = target.MaxRounds;
+            config.MaxRunMinutes = target.MaxRunMinutes;
+
+            if (!present.Contains("MergeFreeSpace")) config.MergeFreeSpace = true;
+
+            config.ConfigVersion = 8;
+            migrated = true;
+            var extra = mappedFromCustom
+                ? $"配置已升级到 v8：旧「自定义」参数按最接近的「{target.Name}」档归并" +
+                  $"（最小文件 {target.MinFileSizeKB}KB、单轮 {target.MaxFilesPerRun} 文件/{target.MaxBytesPerRunGB}GB、" +
+                  $"可回收 {target.MinReclaimMB}MB、{target.MaxRounds} 轮）；文件碎片率阈值与其它设置保持不变"
+                : $"配置已升级到 v8：整理参数统一由「{target.Name}」档管理；文件碎片率阈值与其它设置保持不变";
             note = note is null ? extra : note + "；" + extra;
         }
 

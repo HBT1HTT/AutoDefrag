@@ -27,7 +27,19 @@ public static class WorkerHost
 
             var mode = GetValue(args, "--worker") ?? "status";
             var driveText = GetValue(args, "--drives") ?? string.Empty;
-            var drives = driveText.Split(new[] { ',', ';', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            var requestedDrives = driveText
+                .Split(new[] { ',', ';', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(d => d.Trim().TrimEnd('\\'))
+                .ToArray();
+            // 白名单：只接受“字母 + 冒号”，其余参数丢弃并记日志，避免把任意字符串传进后续逻辑
+            var drives = requestedDrives
+                .Where(DiskService.IsValidDriveSpec)
+                .Select(d => d.ToUpperInvariant())
+                .ToArray();
+            if (drives.Length != requestedDrives.Length)
+            {
+                Logger.Warn($"忽略 {requestedDrives.Length - drives.Length} 个非法磁盘参数（只接受 A: 形式的盘符）");
+            }
 
             var threshold = 70;
             var thresholdText = GetValue(args, "--threshold");
@@ -57,23 +69,23 @@ public static class WorkerHost
             // 整理质量与 P1/P2 参数：worker 自己再规范化一次，防止旧版 UI 或手写命令行传入越界值
             var prefs = new DefragPreferences(
                 GetValue(args, "--quality") ?? DefragQualityPresets.Balanced,
-                minFrag > 0,
-                minFrag > 0 ? minFrag : 10,
                 GetInt(args, "--minfilekb", 32),
-                GetInt(args, "--maxfiles", 80),
-                GetInt(args, "--maxbytesgb", 16),
+                GetInt(args, "--maxfiles", 100),
+                GetInt(args, "--maxbytesgb", 20),
                 GetInt(args, "--minreclaimmb", 4),
                 GetValue(args, "--verify") ?? "Auto",
-                GetInt(args, "--rounds", 3),
-                GetInt(args, "--maxminutes", 120),
-                (GetValue(args, "--ssdopt") ?? "1") != "0").Normalized();
+                GetInt(args, "--rounds", 4),
+                GetInt(args, "--maxminutes", 180),
+                (GetValue(args, "--ssdopt") ?? "1") != "0",
+                (GetValue(args, "--mergefree") ?? "1") != "0").Normalized();
 
             var qualityName = DefragQualityPresets.Match(prefs)?.Name
                               ?? (prefs.Quality == DefragQualityPresets.Custom ? "自定义" : DefragQualityPresets.Get(prefs.Quality).Name);
             var thresholdLog = isClean
                 ? $", CPU上限={threshold}%, 整理方式={EngineResolver.ModeText(engine)}, 文件碎片率={(minFrag > 0 ? $"≥{minFrag}%" : "不限")}" +
                   $", 质量={qualityName}, 最小文件={prefs.MinFileSizeKB}KB, 单轮≤{prefs.MaxFilesPerRun}文件/{prefs.MaxBytesPerRunGB}GB" +
-                  $", 可回收≥{prefs.MinReclaimMB}MB, 校验={prefs.VerifyMode}, 最多{prefs.MaxRounds}轮, 固态只优化={(prefs.SsdOptimizeOnly ? "是" : "否")}"
+                  $", 可回收≥{prefs.MinReclaimMB}MB, 校验={prefs.VerifyMode}, 最多{prefs.MaxRounds}轮, 固态只优化={(prefs.SsdOptimizeOnly ? "是" : "否")}" +
+                  $", 机械盘合并空闲={(prefs.MergeFreeSpace ? "是" : "否")}"
                 : ", CPU上限=(检查磁盘时不需要)";
             Logger.Info($"后台任务启动: 模式={modeName}({mode}), 磁盘={(drives.Length == 0 ? "(自动)" : string.Join(",", drives))}{thresholdLog}");
 

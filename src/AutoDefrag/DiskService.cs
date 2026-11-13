@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.RegularExpressions;
 
 namespace AutoDefrag;
 
@@ -7,6 +8,12 @@ public enum DiskMediaKind { Hdd, Ssd, Unknown }
 
 public static class DiskService
 {
+    private static readonly Regex DriveSpecRegex = new(@"^[A-Za-z]:$", RegexOptions.Compiled);
+
+    /// <summary>盘符白名单：只接受单个字母加冒号，拒绝 UNC、相对路径与多余字符。</summary>
+    public static bool IsValidDriveSpec(string? text) =>
+        !string.IsNullOrWhiteSpace(text) && DriveSpecRegex.IsMatch(text.Trim());
+
     /// <summary>只枚举本地固定磁盘（不含 U 盘 / 光驱 / 网络盘）。</summary>
     public static List<DriveInfo> GetFixedDrives()
     {

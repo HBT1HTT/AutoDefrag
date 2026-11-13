@@ -38,21 +38,28 @@ public static class RewritePlanner
         };
 
         var clusterBytes = analysis.Geometry.ClusterBytes;
+        var effectiveReclaim = EffectiveReclaimBytes(options);
         var candidates = new List<CandidateFile>();
         foreach (var file in analysis.Files)
         {
-            if (IsCandidate(file, options, clusterBytes))
+            if (IsCandidate(file, options, clusterBytes, effectiveReclaim))
             {
-                candidates.Add(Score(file));
+                candidates.Add(Score(file, options));
                 continue;
             }
 
             // 只因碎片率没达到用户设定阈值而排除的，单独计数，写进日志/报告“未达阈值”
             if (options.MinFragmentationPercent > 0 &&
                 file.FragmentationPercent < options.MinFragmentationPercent &&
-                IsCandidateExceptFrag(file, options, clusterBytes))
+                IsCandidateExceptFrag(file, options, clusterBytes, effectiveReclaim))
             {
                 AddSkip(plan, $"未达碎片率阈值(<{options.MinFragmentationPercent:0.#}%)");
+            }
+            else if (file.ExtentCount >= 2 && file.FragmentedClusters >= 1 && !file.HasSparse &&
+                     file.TotalClusters >= 2 && file.FragmentedClusters * (long)clusterBytes < EffectiveReclaimFor(file, options, clusterBytes, effectiveReclaim))
+            {
+                // 可回收空间低于下限：这是覆盖率提升的主要来源之一，明确计数而不是静默丢弃
+                AddSkip(plan, $"可回收碎片不足(<{DiskService.FormatBytes(EffectiveReclaimFor(file, options, clusterBytes, effectiveReclaim))})");
             }
         }
 
@@ -102,43 +109,77 @@ public static class RewritePlanner
         plan.PlannedBytes = plannedBytes;
         Logger.Info(
             $"{plan.Drive} 计划: 候选={plan.Candidates.Count}, 选中={plan.Selected.Count}, " +
-            $"合计={DiskService.FormatBytes(plannedBytes)}, dry-run={options.DryRun}");
+            $"合计={DiskService.FormatBytes(plannedBytes)}, dry-run={options.DryRun}" +
+            (options.RelaxedFilters ? "（补扫轮：已放宽最小文件/可回收门槛）" : string.Empty) +
+            (effectiveReclaim == options.MinReclaimBytes ? string.Empty : $"，可回收下限临时放宽到 {DiskService.FormatBytes(effectiveReclaim)}"));
         return plan;
     }
 
+    /// <summary>补扫轮把“可回收不足”的下限放宽到 256KB（仍不低于 1 个簇）。</summary>
+    private static long EffectiveReclaimBytes(RewriteOptions options)
+    {
+        if (!options.RelaxedFilters) return Math.Max(0, options.MinReclaimBytes);
+        var relaxed = Math.Max(0, options.RelaxedMinReclaimBytes);
+        return options.MinReclaimBytes <= 0
+            ? relaxed
+            : Math.Min(options.MinReclaimBytes, relaxed);
+    }
+
+    /// <summary>
+    /// 单个文件实际采用的可回收下限：
+    /// Windows /A 只统计 ≤64MB 的文件，这类文件即使只有 1 个簇的尾巴也会让 /A 记一笔碎片，
+    /// 所以在这类卷上把它们的下限放宽到 1 个簇；更大的文件仍按配置门槛，避免为几 MB 收益重写几十 GB。
+    /// </summary>
+    private static long EffectiveReclaimFor(FileLayout layout, RewriteOptions options, int clusterBytes, long baseReclaim)
+    {
+        if (options.WindowsFragmentationFocus && layout.SizeBytes <= RewriteOptions.WindowsAnalyzedFileMaxBytes)
+            return Math.Min(baseReclaim, clusterBytes);
+        return baseReclaim;
+    }
+
     /// <summary>能否作为重写候选（不含运行时占用/权限检查）。</summary>
-    private static bool IsCandidate(FileLayout layout, RewriteOptions options, int clusterBytes)
+    private static bool IsCandidate(FileLayout layout, RewriteOptions options, int clusterBytes, long minReclaimBytes)
     {
         if (layout.ExtentCount < 2) return false;
         if (layout.FragmentedClusters < 1) return false;
         if (layout.HasSparse) return false;
         if (layout.TotalClusters < 2) return false;
         if (layout.FragmentationPercent < options.MinFragmentationPercent) return false;
-        if (layout.FragmentedClusters * clusterBytes < options.MinReclaimBytes) return false;
+        var floor = EffectiveReclaimFor(layout, options, clusterBytes, minReclaimBytes);
+        if (layout.FragmentedClusters * (long)clusterBytes < floor) return false;
         return true;
     }
 
     /// <summary>除“碎片率门槛”之外的硬条件是否满足。</summary>
-    private static bool IsCandidateExceptFrag(FileLayout layout, RewriteOptions options, int clusterBytes)
+    private static bool IsCandidateExceptFrag(FileLayout layout, RewriteOptions options, int clusterBytes, long minReclaimBytes)
     {
+        var floor = EffectiveReclaimFor(layout, options, clusterBytes, minReclaimBytes);
         return layout.ExtentCount >= 2
             && layout.FragmentedClusters >= 1
             && !layout.HasSparse
             && layout.TotalClusters >= 2
-            && layout.FragmentedClusters * clusterBytes >= options.MinReclaimBytes;
+            && layout.FragmentedClusters * (long)clusterBytes >= floor;
     }
 
-    private static CandidateFile Score(FileLayout layout)
+    private static CandidateFile Score(FileLayout layout, RewriteOptions options)
     {
         var extentGain = Math.Min(layout.ExtentCount - 1, 20) * 2;
         var copyCost = (long)(layout.TotalClusters * 0.02);
         var sizeBias = layout.TotalClusters >= 2048 ? 20 : 0;
         var score = layout.FragmentedClusters + extentGain + sizeBias - copyCost;
 
+        // /A 口径加成：先处理 ≤64MB 的多区段文件，直接降低 Windows 报告的总碎片空间。
+        // 这类文件通常重写成本低，放在大文件前面也避免大文件把单轮预算吃光。
+        var aRelevant = options.WindowsFragmentationFocus &&
+                        layout.SizeBytes <= RewriteOptions.WindowsAnalyzedFileMaxBytes &&
+                        layout.ExtentCount >= 2;
+        if (aRelevant) score += 100_000;
+
         var megabytes = layout.SizeBytes / (1024.0 * 1024.0);
         var reason =
             $"可回收 {layout.FragmentedClusters} 簇, 区段 {layout.ExtentCount}, " +
-            $"大小 {megabytes:0.#}MB, 碎片率 {layout.FragmentationPercent:0.##}%";
+            $"大小 {megabytes:0.#}MB, 碎片率 {layout.FragmentationPercent:0.##}%" +
+            (aRelevant ? "（Windows /A 计入）" : string.Empty);
 
         return new CandidateFile { Layout = layout, Score = score, ScoreReason = reason };
     }

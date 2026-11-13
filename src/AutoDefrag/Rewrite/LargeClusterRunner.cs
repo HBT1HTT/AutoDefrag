@@ -22,8 +22,24 @@ public static class LargeClusterRunner
         var decision = EngineResolver.Describe(engineMode, clusterBytes);
 
         // 文件大小门槛按 KB 折算成簇数：64KB 簇盘上 4KB 仍然至少 1 簇（NTFS 最小分配单位）。
+        // 64KB 簇盘（游戏盘常见）在均衡/最彻底档统一放宽到 1 簇，避免把小于 32KB 的文件整类排除。
+        var scanMinFileKb = clusterBytes >= 65536 && prefs.Quality != DefragQualityPresets.Fast
+            ? 1
+            : prefs.MinFileSizeKB;
         var minClusters = Math.Max(1,
-            (int)Math.Ceiling(prefs.MinFileSizeKB * 1024.0 / Math.Max(1, clusterBytes)));
+            (int)Math.Ceiling(scanMinFileKb * 1024.0 / Math.Max(1, clusterBytes)));
+
+        // 补扫轮的下限：至少 1 个簇，最多 256KB；正常轮跑完后再打开，用来吃掉被门槛挡掉的小碎片。
+        var relaxedReclaimBytes = Math.Max(clusterBytes, Math.Min(prefs.MinReclaimMB * 1024L * 1024, 256L * 1024));
+
+        // 覆盖面随档位提高：分析时间、枚举上限与 Runlist 查询上限都放大，
+        // 避免“只调大单轮上限但根本没分析到那么多文件”的假覆盖。
+        var (scanSeconds, maxScanFiles, maxExtentProbes) = prefs.Quality switch
+        {
+            DefragQualityPresets.Fast => (60, 120_000, 12_000),
+            DefragQualityPresets.Thorough => (900, 1_500_000, 300_000),
+            _ => (300, 600_000, 100_000)
+        };
 
         // CPU 守护覆盖全流程：分析/枚举、复制、校验、替换、复核。
         // 命中阈值时 Check() 会原地阻塞，不再读写；回落并稳定后自动继续。
@@ -62,14 +78,18 @@ public static class LargeClusterRunner
         var baseOptions = new
         {
             ScanRoot = scanRoot,
+            ScanSeconds = scanSeconds,
+            MaxScanFiles = maxScanFiles,
+            MaxExtentProbes = maxExtentProbes,
             MinFragmentationPercent = minFrag,
             EngineDecision = decision,
             Guard = guard,
-            MinFileSizeKB = prefs.MinFileSizeKB,
+            MinFileSizeKB = scanMinFileKb,
             MinFileClusters = minClusters,
             MaxFiles = prefs.MaxFilesPerRun,
             MaxBytes = prefs.MaxBytesPerRunGB * 1024L * 1024 * 1024,
             MinReclaimBytes = prefs.MinReclaimMB * 1024L * 1024,
+            RelaxedMinReclaimBytes = relaxedReclaimBytes,
             VerifyMode = prefs.VerifyMode,
             MaxRunMinutes = prefs.MaxRunMinutes
         };
@@ -77,21 +97,30 @@ public static class LargeClusterRunner
         var options = dryRun
             ? new RewriteOptions
             {
-                DryRun = true, ScanSeconds = 60, MaxScanFiles = 150_000, MaxExtentProbes = 12_000,
+                DryRun = true, ScanSeconds = Math.Min(scanSeconds, 120), MaxScanFiles = maxScanFiles,
+                MaxExtentProbes = maxExtentProbes,
                 ScanRoot = baseOptions.ScanRoot, MinFragmentationPercent = baseOptions.MinFragmentationPercent,
                 EngineDecision = baseOptions.EngineDecision, Guard = baseOptions.Guard,
                 MinFileSizeKB = baseOptions.MinFileSizeKB, MinFileClusters = baseOptions.MinFileClusters,
                 MaxFiles = baseOptions.MaxFiles, MaxBytes = baseOptions.MaxBytes,
-                MinReclaimBytes = baseOptions.MinReclaimBytes, VerifyMode = baseOptions.VerifyMode,
+                MinReclaimBytes = baseOptions.MinReclaimBytes,
+                RelaxedMinReclaimBytes = baseOptions.RelaxedMinReclaimBytes,
+                VerifyMode = baseOptions.VerifyMode,
+                WindowsFragmentationFocus = prefs.Quality != DefragQualityPresets.Fast,
                 MaxRounds = maxRounds, MaxRunMinutes = baseOptions.MaxRunMinutes
             }
             : new RewriteOptions
             {
-                ScanRoot = baseOptions.ScanRoot, MinFragmentationPercent = baseOptions.MinFragmentationPercent,
+                ScanRoot = baseOptions.ScanRoot, ScanSeconds = baseOptions.ScanSeconds,
+                MaxScanFiles = baseOptions.MaxScanFiles, MaxExtentProbes = baseOptions.MaxExtentProbes,
+                MinFragmentationPercent = baseOptions.MinFragmentationPercent,
                 EngineDecision = baseOptions.EngineDecision, Guard = baseOptions.Guard,
                 MinFileSizeKB = baseOptions.MinFileSizeKB, MinFileClusters = baseOptions.MinFileClusters,
                 MaxFiles = baseOptions.MaxFiles, MaxBytes = baseOptions.MaxBytes,
-                MinReclaimBytes = baseOptions.MinReclaimBytes, VerifyMode = baseOptions.VerifyMode,
+                MinReclaimBytes = baseOptions.MinReclaimBytes,
+                RelaxedMinReclaimBytes = baseOptions.RelaxedMinReclaimBytes,
+                VerifyMode = baseOptions.VerifyMode,
+                WindowsFragmentationFocus = prefs.Quality != DefragQualityPresets.Fast,
                 MaxRounds = maxRounds, MaxRunMinutes = baseOptions.MaxRunMinutes
             };
 
@@ -148,13 +177,15 @@ public static class LargeClusterRunner
             }
 
             state.CoveragePercent = Coverage(previewPlan) ?? -1;
+            var previewGate = EvaluateMergeGate(prefs, media, previewPlan);
             ProgressLog.Append($"{drive} 分析完成：候选={previewPlan.Candidates.Count}，选中={previewPlan.Selected.Count}，" +
                                $"计划处理 {DiskService.FormatBytes(previewPlan.PlannedBytes)}，" +
                                $"覆盖率 {state.CoveragePercent:0.#}%（仅已分析文件）");
-            var preview = RewriteReport.BuildPreview(previewPlan);
+            ProgressLog.Append($"{drive} 空闲空间合并（预览）：{(previewGate.Allowed ? "满足门槛，真实整理时会先执行 /X" : "不执行")}（{previewGate.Reason}）");
+            var preview = RewriteReport.BuildPreview(previewPlan, previewGate);
             var path = RewriteReport.Save(previewPlan, preview);
             Logger.Info($"{drive} dry-run 完成：候选={previewPlan.Candidates.Count}, 选中={previewPlan.Selected.Count}, " +
-                        $"覆盖率={state.CoveragePercent:0.#}%, 报告={path ?? "(写入失败)"}");
+                        $"覆盖率={state.CoveragePercent:0.#}%, 空闲合并评估={(previewGate.Allowed ? "满足" : "不满足")}, 报告={path ?? "(写入失败)"}");
             state.Percent = 100;
             state.Phase = "完成";
             state.SetStage("完成", $"{drive} 预览完成（未改动任何文件）");
@@ -162,17 +193,87 @@ public static class LargeClusterRunner
             return BuildResult(drive, media, clusterBytes, dryRun, previewPlan, null,
                 $"{drive} 预览完成：候选 {previewPlan.Candidates.Count} 个，计划处理 {previewPlan.Selected.Count} 个，未改动任何文件（{DiskService.FormatBytes(previewPlan.PlannedBytes)}）",
                 "成功", startTime, previewPlan.Analysis.FileFragmentationPercent, null, path,
-                guard.PausedCount, guard.ResumedCount, state.CoveragePercent, 0);
+                guard.PausedCount, guard.ResumedCount, state.CoveragePercent, 0,
+                mergeGate: previewGate);
         }
 
         var summary = new RewriteSummary();
         var deadline = prefs.MaxRunMinutes > 0 ? startTime.AddMinutes(prefs.MaxRunMinutes) : DateTime.MaxValue;
         RewritePlan? plan = null;
+        RewritePlan? firstPlan = null;
         VolumeLayout? volumeBefore = null;
         var fragBefore = 0.0;
+        var relaxed = false;
+        var previousSelected = int.MaxValue;
+        var volumeBytes = VolumeBytesOf(drive);
+
+        MergeGate? mergeGate = null;
+        MergeRunResult? mergeRun = null;
+        ExternalFragResult? winBefore = null;
+        ExternalFragResult? winAfter = null;
+
+        // 对外口径 1/2：整理前用 Windows 自带 defrag /A 测一次整卷碎片率（只读）。
+        // 64KB 簇卷上 /A 可能不可用；失败时如实记录退出码/错误码，绝不编造数值。
+        if (media == DiskMediaKind.Hdd)
+        {
+            state.Stage = "分析碎片";
+            state.Message = $"正在用 Windows /A 复测 {drive} 整理前的整卷碎片率";
+            state.Save();
+            ProgressLog.Append($"{drive} 用 Windows /A 复测整理前整卷碎片率（只读）");
+            winBefore = DefragEngine.AnalyzeFrag(drive, volumeBytes, cpuThreshold, highSeconds, lowSeconds, state, "整理前 /A");
+            LogExternalFrag(drive, "整理前", winBefore);
+
+            if (DefragPolicy.IgnoresSystemNoAction(clusterBytes) && DefragPolicy.SystemReportsNoAction(winBefore))
+            {
+                // 大簇卷的 /A 不可信：即使它说“无需整理”，也必须继续文件级重写
+                Logger.Info($"{drive} Windows /A 显示无需整理（{winBefore?.FragPercent?.ToString("0.##") ?? "0"}%），" +
+                            $"但簇大小 {clusterBytes} 字节 > {DefragPolicy.SystemDefragClusterLimit}：按策略继续文件级重写");
+                ProgressLog.Append($"{drive} 系统 /A 显示无需整理，但大簇卷分析不可信：继续文件级重写");
+            }
+        }
+
+        // 空闲空间合并必须排在文件重写之前：先 /X 把数据搬进连续区，给后续重写留下大块连续空闲；
+        // 若先重写再 /X，重写临时文件/备份会重新打散空闲空间，合并收益被抵消。
+        RewritePlan? pendingPlan = null;
+        VolumeLayout? preMergeVolume = null;
+        double? preMergeFrag = null;
+        if (media == DiskMediaKind.Hdd)
+        {
+            state.Stage = "分析碎片";
+            state.Message = $"正在分析 {drive} 的空闲布局（判断是否合并空闲空间）";
+            state.Save();
+            pendingPlan = RewritePlanner.Build(drive, options, state);
+            if (pendingPlan is not null)
+            {
+                preMergeVolume = pendingPlan.Volume;
+                preMergeFrag = pendingPlan.Analysis.FileFragmentationPercent;
+                mergeGate = EvaluateMergeGate(prefs, media, pendingPlan, winBefore?.FragPercent);
+                ProgressLog.Append($"{drive} 空闲空间合并评估：{(mergeGate.Allowed ? "满足门槛" : "不执行")}（{mergeGate.Reason}）");
+                Logger.Info($"{drive} 空闲空间合并评估: {(mergeGate.Allowed ? "满足门槛" : "不执行")}；{mergeGate.Reason}");
+
+                if (mergeGate.Allowed && !File.Exists(options.StopFlagFile))
+                {
+                    mergeRun = DefragEngine.RunFreeSpaceMerge(drive, cpuThreshold, highSeconds, lowSeconds, state);
+                    // /X 实际搬动过文件（无论成功与否）都必须重新扫描，旧计划的区段已经过期
+                    pendingPlan = null;
+                    if (mergeRun.Status == "已停止")
+                    {
+                        summary.Stopped = true;
+                    }
+                    else if (mergeRun.Status != "成功")
+                    {
+                        // 失败/不确定不阻断文件重写，但会体现在最终状态与报告里，不能记成成功
+                        Logger.Warn($"{drive} 空闲空间合并未成功：{mergeRun.Status}（{mergeRun.Detail}），继续执行文件级重写");
+                        ProgressLog.Append($"{drive} 空闲空间合并未成功：{mergeRun.Status}；继续文件级重写，最终结果会标注");
+                    }
+                }
+            }
+        }
 
         for (var round = 1; round <= maxRounds; round++)
         {
+            if (summary.Stopped) break;
+
             if (round > 1)
             {
                 if (File.Exists(options.StopFlagFile))
@@ -190,12 +291,26 @@ public static class LargeClusterRunner
                     break;
                 }
 
+                // 上一轮没有被单轮上限截断（selected < MaxFiles），说明正常门槛的候选已经跑完；
+                // 下一轮自动打开补扫，把“文件太小/可回收不足”挡掉的合理小碎片也纳入。
+                if (!relaxed && previousSelected < options.MaxFiles)
+                {
+                    relaxed = true;
+                    summary.RelaxedRounds++;
+                    Logger.Info($"{drive} 正常候选已处理完，第 {round} 轮启用补扫：最小文件降至 1 簇，可回收下限放宽到 {DiskService.FormatBytes(relaxedReclaimBytes)}");
+                    ProgressLog.Append($"{drive} 第 {round} 轮启用补扫：纳入更小的碎片文件，直到收敛或达到轮次上限");
+                }
+
                 ProgressLog.Append($"{drive} 开始第 {round}/{maxRounds} 轮（重新扫描候选）");
             }
 
+            var roundOptions = relaxed
+                ? options with { RelaxedFilters = true, RelaxedMinFileSizeKB = 1, RelaxedMinFileClusters = 1 }
+                : options;
+
             state.Round = round;
             state.RoundTotal = maxRounds;
-            state.SetStage("分析碎片", $"正在分析 {drive} 的碎片（第 {round}/{maxRounds} 轮）");
+            state.SetStage("分析碎片", $"正在分析 {drive} 的碎片（第 {round}/{maxRounds} 轮{(relaxed ? "，补扫" : string.Empty)}）");
             state.Phase = "分析";
             state.Percent = -1;
             state.CurrentFile = string.Empty;
@@ -207,13 +322,15 @@ public static class LargeClusterRunner
             state.Save();
 
             guard.Phase = "分析";
-            var roundPlan = RewritePlanner.Build(drive, options, state);
+            var roundPlan = pendingPlan ?? RewritePlanner.Build(drive, roundOptions, state);
+            pendingPlan = null;
             if (roundPlan is null)
             {
                 if (plan is null)
                 {
                     return BuildResult(drive, media, clusterBytes, dryRun, null, null,
-                        $"{drive} 无法读取卷信息（位图/Runlist 接口失败），本次未做任何操作", "失败", startTime, null, null);
+                        $"{drive} 无法读取卷信息（位图/Runlist 接口失败），本次未做任何操作", "失败", startTime, null, null,
+                        mergeGate: mergeGate, mergeRun: mergeRun, winBefore: winBefore, winAfter: winAfter);
                 }
 
                 Logger.Warn($"{drive} 第 {round} 轮无法读取卷信息，结束后续轮次");
@@ -225,28 +342,30 @@ public static class LargeClusterRunner
             summary.Rounds = round;
             if (round == 1)
             {
-                volumeBefore = plan.Volume;
-                fragBefore = plan.Analysis.FileFragmentationPercent;
+                firstPlan = plan;
+                volumeBefore = preMergeVolume ?? plan.Volume;
+                fragBefore = preMergeFrag ?? plan.Analysis.FileFragmentationPercent;
             }
 
             var coverage = Coverage(plan);
             state.CoveragePercent = coverage ?? -1;
-            ProgressLog.Append($"{drive} 第 {round}/{maxRounds} 轮分析完成：候选={plan.Candidates.Count}，选中={plan.Selected.Count}，" +
+            previousSelected = plan.Selected.Count;
+            ProgressLog.Append($"{drive} 第 {round}/{maxRounds} 轮{(relaxed ? "（补扫）" : string.Empty)}分析完成：候选={plan.Candidates.Count}，选中={plan.Selected.Count}，" +
                                $"计划处理 {DiskService.FormatBytes(plan.PlannedBytes)}，覆盖率 {state.CoveragePercent:0.#}%（仅已分析文件）");
             Logger.Info($"{drive} 第 {round}/{maxRounds} 轮计划: 候选={plan.Candidates.Count}, 选中={plan.Selected.Count}, " +
-                        $"合计={DiskService.FormatBytes(plan.PlannedBytes)}, 覆盖率={state.CoveragePercent:0.#}%");
+                        $"合计={DiskService.FormatBytes(plan.PlannedBytes)}, 覆盖率={state.CoveragePercent:0.#}%, 补扫={relaxed}");
 
             if (plan.Selected.Count == 0)
             {
-                if (round == 1)
+                if (round == 1 && maxRounds > 1)
                 {
-                    ProgressLog.Append($"{drive} 没有符合条件的文件，本轮结束");
+                    // 正常门槛没有候选：不要直接结束，下一轮用补扫门槛再试一次
+                    ProgressLog.Append($"{drive} 正常门槛没有符合条件的文件，下一轮启用补扫");
+                    continue;
                 }
-                else
-                {
-                    Logger.Info($"{drive} 第 {round} 轮已无合格候选，多轮整理结束");
-                    ProgressLog.Append($"{drive} 第 {round} 轮已无合格候选，多轮整理结束");
-                }
+
+                Logger.Info($"{drive} 第 {round} 轮已无合格候选，多轮整理结束");
+                ProgressLog.Append($"{drive} 第 {round} 轮已无合格候选，多轮整理结束");
                 break;
             }
 
@@ -293,7 +412,7 @@ public static class LargeClusterRunner
                 state.Phase = "准备";
                 state.ProcessedBytes = doneBytes;
                 state.Percent = totalBytes > 0 ? (int)Math.Min(99, doneBytes * 100.0 / totalBytes) : -1;
-                state.Message = $"第 {round}/{maxRounds} 轮，正在整理 {drive} 第 {i + 1}/{total} 个文件（{DiskService.FormatBytes(fileBytes)}）";
+                state.Message = $"第 {round}/{maxRounds} 轮{(relaxed ? "（补扫）" : string.Empty)}，正在整理 {drive} 第 {i + 1}/{total} 个文件（{DiskService.FormatBytes(fileBytes)}）";
                 state.SetStage("正在重写", state.Message);
                 ProgressLog.Append($"{drive} [第 {round} 轮 {i + 1}/{total}] 开始：{state.CurrentFile}（{DiskService.FormatBytes(fileBytes)}）");
 
@@ -369,8 +488,16 @@ public static class LargeClusterRunner
         // 复算必须基于“最后一轮”的扫描结果；这份扫描也是最新鲜的。
         if (plan is null)
         {
+            if (summary.Stopped)
+            {
+                return BuildResult(drive, media, clusterBytes, dryRun, null, summary,
+                    $"{drive} 已按停止标记停止，未执行文件级重写", "已停止", startTime, null, null,
+                    mergeGate: mergeGate, mergeRun: mergeRun, winBefore: winBefore, winAfter: winAfter);
+            }
+
             return BuildResult(drive, media, clusterBytes, dryRun, null, null,
-                $"{drive} 无法读取卷信息（位图/Runlist 接口失败），本次未做任何操作", "失败", startTime, null, null);
+                $"{drive} 无法读取卷信息（位图/Runlist 接口失败），本次未做任何操作", "失败", startTime, null, null,
+                mergeGate: mergeGate, mergeRun: mergeRun, winBefore: winBefore, winAfter: winAfter);
         }
 
         state.SetStage("分析碎片", $"正在复算 {drive} 的碎片率");
@@ -388,24 +515,46 @@ public static class LargeClusterRunner
         state.Round = Math.Max(1, summary.Rounds);
         state.RoundTotal = maxRounds;
 
-        var content = RewriteReport.BuildResult(plan, summary, volumeBefore, volumeAfter, fragBefore, fragAfter);
+        // 对外口径 2/2：整理后再用 Windows /A 测一次；停止时不跑（停止标记会让 /A 立刻退出）
+        if (media == DiskMediaKind.Hdd && !summary.Stopped)
+        {
+            state.Message = $"正在用 Windows /A 复测 {drive} 整理后的整卷碎片率";
+            state.Save();
+            ProgressLog.Append($"{drive} 用 Windows /A 复测整理后整卷碎片率（只读）");
+            winAfter = DefragEngine.AnalyzeFrag(drive, volumeBytes, cpuThreshold, highSeconds, lowSeconds, state, "整理后 /A");
+            LogExternalFrag(drive, "整理后", winAfter);
+        }
+
+        var content = RewriteReport.BuildResult(plan, summary, volumeBefore, volumeAfter, fragBefore, fragAfter,
+            mergeGate, mergeRun, winBefore, winAfter, firstPlan);
         var reportPath = RewriteReport.Save(plan, content);
 
-        var status = summary.Stopped
+        var mergeFailed = mergeRun is not null && mergeRun.Status == "失败";
+        var status = summary.Stopped || mergeRun?.Status == "已停止"
             ? "已停止"
-            : summary.Results.Count == 0
-                ? "无可整理文件"
-                : summary.Failed == 0 ? "成功" : "部分成功";
+            : mergeFailed
+                ? (summary.Succeeded > 0 ? "部分成功" : "失败")
+                : summary.Results.Count == 0 && mergeRun is null
+                    ? "无可整理文件"
+                    : summary.Failed > 0 ? "部分成功" : "成功";
 
+        var winText = winBefore?.FragPercent is not null || winAfter?.FragPercent is not null
+            ? $"，Windows /A {FormatFrag(winBefore?.FragPercent)} -> {FormatFrag(winAfter?.FragPercent)}"
+            : "，Windows /A 未取得可用数值";
+        var mergeText = mergeRun is null
+            ? string.Empty
+            : $"，空闲合并={mergeRun.Status}";
         var message =
-            $"{drive} 文件级整理完成：{Math.Max(1, summary.Rounds)} 轮，成功 {summary.Succeeded}、失败 {summary.Failed}、跳过 {summary.Skipped}，" +
-            $"碎片率 {fragBefore:0.##}% -> {fragAfter:0.##}%，覆盖率 {(coverageFinal is null ? "未知" : $"{coverageFinal:0.#}%")}（仅已分析文件）";
+            $"{drive} 文件级整理完成：{Math.Max(1, summary.Rounds)} 轮（补扫 {summary.RelaxedRounds} 轮），成功 {summary.Succeeded}、失败 {summary.Failed}、跳过 {summary.Skipped}，" +
+            $"本程序口径 {fragBefore:0.##}% -> {fragAfter:0.##}%，覆盖率 {(coverageFinal is null ? "未知" : $"{coverageFinal:0.#}%")}（仅已分析文件）" +
+            winText + mergeText;
 
         Logger.Info(message);
         Logger.Info($"报告: {reportPath ?? "(写入失败)"}");
         state.SetStage("完成", message);
         return BuildResult(drive, media, clusterBytes, dryRun, plan, summary, message, status, startTime, fragBefore, fragAfter, reportPath,
-            guard.PausedCount, guard.ResumedCount, coverageFinal, summary.Rounds);
+            guard.PausedCount, guard.ResumedCount, coverageFinal, summary.Rounds,
+            mergeGate: mergeGate, mergeRun: mergeRun, winBefore: winBefore, winAfter: winAfter);
     }
 
     /// <summary>覆盖率口径：已分析文件的簇 / 卷总簇；只代表“分析到的文件”，不是整卷。</summary>
@@ -421,11 +570,15 @@ public static class LargeClusterRunner
     {
         var quick = VolumeAnalyzer.Analyze(drive, new RewriteOptions
         {
-            ScanSeconds = 30,
-            MaxScanFiles = 150_000,
-            MaxExtentProbes = 12_000,
+            ScanSeconds = plan.Options.ScanSeconds,
+            MaxScanFiles = plan.Options.MaxScanFiles,
+            MaxExtentProbes = plan.Options.MaxExtentProbes,
             MinFragmentationPercent = 0,
+            MinFileSizeKB = 0,
             MinFileClusters = 1,
+            RelaxedFilters = true,
+            RelaxedMinFileSizeKB = 1,
+            RelaxedMinFileClusters = 1,
             ScanRoot = plan.Options.ScanRoot,
             Guard = plan.Options.Guard
         });
@@ -437,6 +590,37 @@ public static class LargeClusterRunner
         var reclaimed = summary.ReclaimedFragmentedClusters;
         return Math.Max(0, (plan.Analysis.AnalyzedFragmentedClusters - reclaimed) * 100.0 / before);
     }
+
+    /// <summary>用当前计划里的卷几何与空闲布局评估 /X 门槛；/A 有可用数值时优先用 /A。</summary>
+    private static MergeGate EvaluateMergeGate(DefragPreferences prefs, DiskMediaKind media, RewritePlan plan, double? externalFrag = null)
+    {
+        var volumeBytes = plan.Geometry.TotalClusters * (long)plan.Geometry.ClusterBytes;
+        var freeBytes = (plan.Volume?.FreeClusters ?? plan.Geometry.FreeClusters) * (long)plan.Geometry.ClusterBytes;
+        var frag = externalFrag ?? plan.Analysis.FileFragmentationPercent;
+        return DefragEngine.EvaluateMergeGate(prefs.MergeFreeSpace, media, frag, volumeBytes, freeBytes, plan.Volume);
+    }
+
+    private static long VolumeBytesOf(string drive)
+    {
+        try { return new DriveInfo(drive).TotalSize; }
+        catch { return 0; }
+    }
+
+    private static void LogExternalFrag(string drive, string stage, ExternalFragResult result)
+    {
+        if (result.FragPercent is not null)
+        {
+            Logger.Info($"{drive} Windows /A {stage}: {result.FragPercent:0.##}%（exit={result.ExitCode?.ToString() ?? "未知"}）");
+            ProgressLog.Append($"{drive} Windows /A {stage}整卷碎片率：{result.FragPercent:0.##}%");
+            return;
+        }
+
+        Logger.Warn($"{drive} Windows /A {stage}未取得可用碎片率：exit={result.ExitCode?.ToString() ?? "未知"}, " +
+                    $"错误码={result.ErrorCode ?? "无"}；报告不会声称整卷碎片率");
+        ProgressLog.Append($"{drive} Windows /A {stage}未取得可用数值（exit={result.ExitCode?.ToString() ?? "未知"}），以本程序口径为准");
+    }
+
+    private static string FormatFrag(double? value) => value is null ? "--" : $"{value:0.##}%";
 
     /// <summary>系统盘（Windows 所在卷）不做文件级重写。</summary>
     public static bool IsSystemVolume(string drive)
@@ -471,20 +655,42 @@ public static class LargeClusterRunner
     private static DriveRunResult BuildResult(
         string drive, DiskMediaKind media, int clusterBytes, bool dryRun, RewritePlan? plan, RewriteSummary? summary,
         string message, string status, DateTime startTime, double? fragBefore, double? fragAfter, string? reportPath = null,
-        int suspended = 0, int resumed = 0, double? coverage = null, int rounds = 0)
+        int suspended = 0, int resumed = 0, double? coverage = null, int rounds = 0,
+        MergeGate? mergeGate = null, MergeRunResult? mergeRun = null,
+        ExternalFragResult? winBefore = null, ExternalFragResult? winAfter = null, RewritePlan? firstPlan = null)
     {
         var arguments = dryRun ? "文件级重写(dry-run)" : "文件级重写";
         Logger.Info($"{drive} {arguments} 结束: 状态={status} 说明={message}" + (reportPath is null ? string.Empty : $" 报告={reportPath}"));
 
+        var failed = status is "失败" or "部分成功";
+        var mergeStatus = mergeRun?.Status ?? (mergeGate is null ? "未启用" : mergeGate.Allowed ? "未执行" : "未启用");
+        var mergeDetail = mergeRun?.Detail ?? mergeGate?.Reason ?? string.Empty;
+
         return new DriveRunResult(
             drive, media, arguments,
-            status == "失败" ? 1 : 0,
+            failed ? 1 : 0,
             suspended, resumed, startTime, DateTime.Now,
             status,
             fragBefore,
             fragAfter,
             clusterBytes,
             coverage,
-            rounds);
+            rounds,
+            MergeStatus: mergeStatus,
+            MergeDetail: mergeDetail,
+            WinFragBefore: winBefore?.FragPercent,
+            WinFragAfter: winAfter?.FragPercent,
+            WinFragNote: BuildWinFragNote(winBefore, winAfter));
+    }
+
+    private static string BuildWinFragNote(ExternalFragResult? before, ExternalFragResult? after)
+    {
+        if (before?.FragPercent is null && after?.FragPercent is null)
+            return "Windows /A 未取得可用数值";
+        if (before?.FragPercent is null)
+            return $"整理后 /A={after!.FragPercent:0.##}%（整理前 /A 失败：exit={before?.ExitCode?.ToString() ?? "未知"}, 错误码={before?.ErrorCode ?? "无"}）";
+        if (after?.FragPercent is null)
+            return $"整理前 /A={before.FragPercent:0.##}%（整理后 /A 失败：exit={after?.ExitCode?.ToString() ?? "未知"}, 错误码={after?.ErrorCode ?? "无"}）";
+        return $"Windows /A 整理前 {before.FragPercent:0.##}% -> 整理后 {after.FragPercent:0.##}%";
     }
 }

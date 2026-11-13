@@ -151,7 +151,7 @@ public static class RewriteCommand
             var result = LargeClusterRunner.Run(letter, media, clusterBytes, state, dryRun, scanRoot,
                 cpuThreshold: cpuThreshold, highSeconds: 10, lowSeconds: 10,
                 minFragmentPercent: minFrag, engineMode: engineMode, settings: prefs);
-            if (result.Status == "失败") failed++;
+            if (result.Status is "失败" or "部分成功") failed++;
             var fragText = dryRun
                 ? $"碎片 {FormatFrag(result.PreFrag)} → 未改动（dry-run，整理后未测量）"
                 : result.PostFrag is null
@@ -161,7 +161,11 @@ public static class RewriteCommand
                 ? string.Empty
                 : $"，覆盖率 {result.CoveragePercent:0.#}%（仅已分析文件）";
             var roundText = result.Rounds > 0 ? $"，{result.Rounds} 轮" : string.Empty;
-            lines.Add($"{letter.TrimEnd(':')}: {result.Status}，{fragText}{coverageText}{roundText}");
+            var winText = result.WinFragBefore is null && result.WinFragAfter is null
+                ? string.Empty
+                : $"，Windows /A {FormatFrag(result.WinFragBefore)} → {FormatFrag(result.WinFragAfter)}";
+            var mergeText = result.MergeStatus is "未启用" or "" ? string.Empty : $"，空闲合并={result.MergeStatus}";
+            lines.Add($"{letter.TrimEnd(':')}: {result.Status}，{fragText}{coverageText}{roundText}{winText}{mergeText}");
         }
 
         var summary = string.Join(Environment.NewLine, lines);

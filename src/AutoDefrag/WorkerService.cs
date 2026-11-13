@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Text;
 
 namespace AutoDefrag;
 
@@ -44,16 +43,26 @@ public sealed class WorkerService
         }
 
         var prefs = defrag?.Normalized();
-        var arguments = BuildArguments(mode, drives, threshold, engine, minFragmentPercent, prefs);
+        var normalizedDrives = NormalizeDrives(drives, out var driveError);
+        if (driveError is not null)
+        {
+            error = driveError;
+            Logger.Warn("拒绝启动整理任务: " + driveError);
+            return false;
+        }
+
+        var arguments = BuildArgumentList(mode, normalizedDrives, threshold, engine, minFragmentPercent, prefs);
         var psi = new ProcessStartInfo
         {
             FileName = AppPaths.ExePath,
-            Arguments = arguments,
             Verb = "runas",
             UseShellExecute = true,
             WindowStyle = ProcessWindowStyle.Hidden,
             WorkingDirectory = AppPaths.ExeDir
         };
+        // 逐项传参：由 .NET 负责引号与转义，不再手工拼命令行字符串
+        foreach (var argument in arguments)
+            psi.ArgumentList.Add(argument);
 
         try
         {
@@ -107,40 +116,80 @@ public sealed class WorkerService
         return true;
     }
 
-    private static string BuildArguments(string mode, string[]? drives, int threshold, string engine, int minFragmentPercent,
-        DefragPreferences? prefs)
+    /// <summary>盘符白名单：只保留“字母 + 冒号”，任何非法项都拒绝整个任务，避免半套参数启动。</summary>
+    private static string[]? NormalizeDrives(string[]? drives, out string? error)
     {
-        var sb = new StringBuilder("--worker ").Append(mode);
+        error = null;
+        if (drives is not { Length: > 0 }) return drives;
+
+        var normalized = new List<string>();
+        foreach (var raw in drives)
+        {
+            var text = (raw ?? string.Empty).Trim().TrimEnd('\\');
+            if (!DiskService.IsValidDriveSpec(text))
+            {
+                error = $"磁盘参数无效：{raw}（只接受 A: 形式的盘符）";
+                return null;
+            }
+
+            normalized.Add(text.ToUpperInvariant());
+        }
+
+        return normalized.ToArray();
+    }
+
+    private static List<string> BuildArgumentList(string mode, string[]? drives, int threshold, string engine,
+        int minFragmentPercent, DefragPreferences? prefs)
+    {
+        var arguments = new List<string> { "--worker", mode };
         if (drives is { Length: > 0 })
         {
-            sb.Append(" --drives \"").Append(string.Join(",", drives)).Append('"');
+            arguments.Add("--drives");
+            arguments.Add(string.Join(",", drives));
         }
+
         if (mode == "clean")
         {
             var p = prefs ?? DefragPreferences.Default;
-            sb.Append(" --threshold ").Append(Math.Clamp(threshold, 10, 100));
-            sb.Append(" --engine ").Append(EngineResolver.IsValid(engine) ? engine : "Self");
-            sb.Append(" --minfrag ").Append(minFragmentPercent is >= 1 and <= 15 ? minFragmentPercent : 0);
+            arguments.Add("--threshold");
+            arguments.Add(Math.Clamp(threshold, 10, 100).ToString());
+            arguments.Add("--engine");
+            arguments.Add(EngineResolver.IsValid(engine) ? engine : "Self");
+            arguments.Add("--minfrag");
+            arguments.Add((minFragmentPercent is >= 1 and <= 15 ? minFragmentPercent : 0).ToString());
             // 整理质量与 P1/P2 参数：worker 自己做范围夹紧，命令行只负责传递
-            sb.Append(" --quality ").Append(p.Quality);
-            sb.Append(" --minfilekb ").Append(p.MinFileSizeKB);
-            sb.Append(" --maxfiles ").Append(p.MaxFilesPerRun);
-            sb.Append(" --maxbytesgb ").Append(p.MaxBytesPerRunGB);
-            sb.Append(" --minreclaimmb ").Append(p.MinReclaimMB);
-            sb.Append(" --verify ").Append(p.VerifyMode);
-            sb.Append(" --rounds ").Append(p.MaxRounds);
-            sb.Append(" --maxminutes ").Append(p.MaxRunMinutes);
-            sb.Append(" --ssdopt ").Append(p.SsdOptimizeOnly ? "1" : "0");
+            arguments.Add("--quality");
+            arguments.Add(p.Quality);
+            arguments.Add("--minfilekb");
+            arguments.Add(p.MinFileSizeKB.ToString());
+            arguments.Add("--maxfiles");
+            arguments.Add(p.MaxFilesPerRun.ToString());
+            arguments.Add("--maxbytesgb");
+            arguments.Add(p.MaxBytesPerRunGB.ToString());
+            arguments.Add("--minreclaimmb");
+            arguments.Add(p.MinReclaimMB.ToString());
+            arguments.Add("--verify");
+            arguments.Add(p.VerifyMode);
+            arguments.Add("--rounds");
+            arguments.Add(p.MaxRounds.ToString());
+            arguments.Add("--maxminutes");
+            arguments.Add(p.MaxRunMinutes.ToString());
+            arguments.Add("--ssdopt");
+            arguments.Add(p.SsdOptimizeOnly ? "1" : "0");
+            arguments.Add("--mergefree");
+            arguments.Add(p.MergeFreeSpace ? "1" : "0");
         }
         else
         {
             // 检查磁盘也要跑 defrag /A 预检，同样需要 CPU 守护阈值
-            sb.Append(" --threshold ").Append(Math.Clamp(threshold, 10, 100));
+            arguments.Add("--threshold");
+            arguments.Add(Math.Clamp(threshold, 10, 100).ToString());
         }
 
         // 数据目录由主进程指定：提权到另一个管理员账户时也能读写同一份状态/停止标记/结果
-        sb.Append(" --datadir \"").Append(AppPaths.Root).Append('"');
-        return sb.ToString();
+        arguments.Add("--datadir");
+        arguments.Add(AppPaths.Root);
+        return arguments;
     }
 
     private static bool ProcessExists(int pid)

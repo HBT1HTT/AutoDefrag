@@ -16,18 +16,19 @@ namespace AutoDefrag;
 /// </summary>
 public static class DefragEngine
 {
-    /// <summary>/X（空闲空间合并）的启用门槛：碎片率与空闲空间占比都不低于该值。</summary>
-    private const double MergeFreeSpaceFragThreshold = 10.0;
-    private const double MergeFreeSpaceFreeRatio = 10.0;
+    /// <summary>/X（空闲空间合并）的启用门槛：碎片率、空闲空间占比与空闲碎片度都必须达到该值。</summary>
+    public const double MergeFreeSpaceFragThreshold = 5.0;
+    public const double MergeFreeSpaceFreeRatio = 10.0;
+    public const double MergeFreeSpaceFreeFragThreshold = 5.0;
+
+    /// <summary>空闲空间少于 1GB 时不做 /X：搬移收益太小，耗时不划算。</summary>
+    public const long MergeFreeSpaceMinFreeBytes = 1L * 1024 * 1024 * 1024;
 
     /// <summary>defrag 输出里只保留这么多字符，避免日志被进度刷屏。</summary>
     private const int MaxCaptureChars = 3000;
     private const int MaxLogChars = 1500;
 
     private static readonly UTF8Encoding Utf8NoBom = new(false);
-    private static readonly Regex FragKeyRegex = new(@"fragmented\s+space", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex PercentValueRegex = new(@"^([\d.,]+)\s*%$", RegexOptions.Compiled);
-    private static readonly Regex SizeValueRegex = new(@"^([\d.,]+)\s*(TB|GB|MB|KB|B)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     /// <summary>defrag 的 FACILITY_DEFRAG 错误码，例如权限不足的 0x89000024。</summary>
     private static readonly Regex ErrorCodeRegex = new(@"0x89[0-9a-fA-F]{6}", RegexOptions.Compiled);
 
@@ -172,6 +173,14 @@ public static class DefragEngine
                 }
 
                 Logger.Info($"{drive} 的存储块为 {DiskService.ClusterText(clusterBytes)}（大于 4KB）：不使用系统 defrag，改走文件级重写整理");
+                if (DefragPolicy.IgnoresSystemNoAction(clusterBytes))
+                {
+                    // 策略：大簇卷上 /A 的“无需整理/0%”不能作为跳过依据；这里显式写明，
+                    // 避免以后有人把 /A 结果接进分派条件时误伤唯一有效的整理路径。
+                    Logger.Info($"{drive} 策略：簇 {clusterBytes} 字节 > {DefragPolicy.SystemDefragClusterLimit}，" +
+                                "忽略系统 /A 的“无需整理”结论，始终执行文件级重写");
+                    ProgressLog.Append($"{drive} 大簇卷：系统 /A 的“无需整理”不作为跳过依据，继续文件级重写");
+                }
                 var large = LargeClusterRunner.Run(drive, media, clusterBytes, state, dryRun: false,
                     scanRoot: null, cpuThreshold: cpuThreshold, highSeconds: highSeconds, lowSeconds: lowSeconds,
                     minFragmentPercent: minFragmentPercent, engineMode: engineMode, settings: prefs);
@@ -194,12 +203,20 @@ public static class DefragEngine
             }
 
             var preFrag = preProbe.FragPercent;
-            if (media == DiskMediaKind.Hdd && preFrag is null)
+
+            // 机械盘空闲空间合并（/X）：只对机械盘、且碎片率/空闲占比/空闲碎片度都达标时才追加。
+            // 门槛不满足时只写原因，不跑长时间的空闲搬移。
+            VolumeLayout? freeLayout = media == DiskMediaKind.Hdd
+                ? VolumeAnalyzer.ReadVolumeLayout(drive, RewriteOptions.Default)
+                : null;
+            var mergeGate = EvaluateMergeGate(prefs.MergeFreeSpace, media, preFrag, volumeBytes, freeBytes, freeLayout);
+            if (media == DiskMediaKind.Hdd)
             {
-                Logger.Warn($"{drive} /A 未获得碎片率（exit={FormatExit(preProbe.ExitCode)}）：/X 门槛无法评估，本次不启用 /X，只执行 /D");
+                Logger.Info($"{drive} 空闲空间合并评估: {(mergeGate.Allowed ? "启用" : "不启用")}；{mergeGate.Reason}");
+                ProgressLog.Append($"{drive} 空闲空间合并: {(mergeGate.Allowed ? "启用 /X" : "不启用")}（{mergeGate.Reason}）");
             }
 
-            var plan = BuildPlan(drive, media, preFrag, volumeBytes, freeBytes, clusterBytes);
+            var plan = BuildPlan(drive, media, preFrag, volumeBytes, freeBytes, clusterBytes, mergeGate);
             Logger.Info($"计划 {drive}: 类型={DiskService.MediaText(media)} 存储块={DiskService.ClusterText(clusterBytes)} " +
                         $"整理方式={decision}（小存储块仍用系统 defrag） 命令={plan.CommandLine} 原因={plan.Reason}");
             ProgressLog.Append($"{drive} 计划: {plan.CommandLine}；{decision}");
@@ -214,6 +231,31 @@ public static class DefragEngine
             // 预检已经发生的挂起/恢复作为基数带入整理阶段，worker_state.json 的口径始终是“本盘累计”
             var run = RunOneDrive(drive, plan, preFrag, cpuThreshold, highSeconds, lowSeconds, state,
                 preProbe.Suspended, preProbe.Resumed);
+
+            // /D /X 合并执行失败时回退为只 /D：空闲合并失败不能连带把文件整理也记成成功或放弃
+            string mergeStatus = plan.MergeRequested
+                ? (run.Status == "成功" ? "成功" : run.Status)
+                : "未启用";
+            string mergeDetail = plan.Reason;
+            if (plan.MergeRequested && run.Status != "成功")
+            {
+                var fallback = BuildPlan(drive, media, preFrag, volumeBytes, freeBytes, clusterBytes,
+                    new MergeGate(false, "合并空闲空间失败，回退为只整理碎片", preFrag, 0, null));
+                Logger.Warn($"{drive} 合并空闲空间未成功（{run.Status}, exit={FormatExit(run.ExitCode)}, 错误码={run.ErrorCode ?? "无"}），" +
+                            $"回退为 {fallback.CommandLine}");
+                ProgressLog.Append($"{drive} 合并空闲空间未成功（{run.Status}），回退为只整理碎片");
+                var fallbackRun = RunOneDrive(drive, fallback, preFrag, cpuThreshold, highSeconds, lowSeconds, state,
+                    run.Suspended, run.Resumed);
+                mergeDetail = plan.Reason + $"；/X 未成功：{run.Status}（exit={FormatExit(run.ExitCode)}, 错误码={run.ErrorCode ?? "无"}）";
+                fallbackRun = fallbackRun with
+                {
+                    Suspended = fallbackRun.Suspended + run.Suspended,
+                    Resumed = fallbackRun.Resumed + run.Resumed
+                };
+                run = fallbackRun.Status == "成功"
+                    ? fallbackRun with { Status = "部分成功", MergeStatus = mergeStatus, MergeDetail = mergeDetail }
+                    : fallbackRun with { MergeStatus = mergeStatus, MergeDetail = mergeDetail };
+            }
 
             state.Stage = "分析碎片";
             state.Message = $"正在复核 {drive} 的碎片率";
@@ -235,7 +277,9 @@ public static class DefragEngine
                 run.Suspended + preProbe.Suspended + postProbe.Suspended,
                 run.Resumed + preProbe.Resumed + postProbe.Resumed,
                 run.StartTime, run.EndTime,
-                postProbe.Stopped ? "已停止" : run.Status, preFrag, postProbe.FragPercent, clusterBytes));
+                postProbe.Stopped ? "已停止" : run.Status, preFrag, postProbe.FragPercent, clusterBytes,
+                MergeStatus: mergeStatus, MergeDetail: mergeDetail,
+                WinFragBefore: preFrag, WinFragAfter: postProbe.FragPercent));
         }
 
         var okCount = results.Count(r => r.Status == "成功");
@@ -246,9 +290,14 @@ public static class DefragEngine
             $"状态={r.Status},exit={r.ExitCode?.ToString() ?? "--"},暂停={r.Suspended},继续={r.Resumed}," +
             $"碎片{FormatFrag(r.PreFrag)}->{FormatFrag(r.PostFrag)}" +
             (r.CoveragePercent is null ? string.Empty : $",覆盖率={r.CoveragePercent:0.#}%（仅已分析文件）") +
-            (r.Rounds > 0 ? $",轮次={r.Rounds}" : string.Empty)));
+            (r.Rounds > 0 ? $",轮次={r.Rounds}" : string.Empty) +
+            (r.WinFragBefore is null && r.WinFragAfter is null ? string.Empty :
+                $",Windows/A={FormatFrag(r.WinFragBefore)}->{FormatFrag(r.WinFragAfter)}") +
+            (r.MergeStatus is "未启用" or "" ? string.Empty : $",空闲合并={r.MergeStatus}") +
+            (string.IsNullOrEmpty(r.ErrorCode) ? string.Empty : $",错误码={r.ErrorCode}")));
 
         Logger.Info($"全部完成: 成功={okCount}/{total}  累计暂停={results.Sum(r => r.Suspended)}次 继续={results.Sum(r => r.Resumed)}次   明细: {summary}");
+        UpdateDriveHistory(results);
         WriteLastResult(string.Join(",", targets), summary, okCount, total);
 
         // 与旧脚本一致：Clean 跑完后写入"每日一次"锁；
@@ -311,6 +360,8 @@ public static class DefragEngine
         state.Save();
 
         var file = new DriveStatusFile { ProbeTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") };
+        // 检查磁盘只刷新探测值；最近一次整理历史（LastRunAt/Status/ErrorCode）从旧文件原样带过来
+        var previousStatus = DriveStatusFile.TryLoad();
         var stopped = false;
         for (var index = 0; index < targets.Count; index++)
         {
@@ -362,13 +413,18 @@ public static class DefragEngine
                 }
             }
 
+            var previousEntry = previousStatus?.Drives.FirstOrDefault(d =>
+                string.Equals(d.Drive, drive, StringComparison.OrdinalIgnoreCase));
             file.Drives.Add(new DriveStatusEntry
             {
                 Drive = drive,
                 VolumeSizeGB = volumeBytes > 0 ? Math.Round(volumeBytes / 1024.0 / 1024 / 1024, 2) : null,
                 FreeSpaceGB = info is null ? null : Math.Round(SafeFreeBytes(info) / 1024.0 / 1024 / 1024, 2),
                 FragPercent = frag,
-                Probed = probed
+                Probed = probed,
+                LastRunAt = previousEntry?.LastRunAt ?? string.Empty,
+                LastRunStatus = previousEntry?.LastRunStatus ?? string.Empty,
+                LastErrorCode = previousEntry?.LastErrorCode ?? string.Empty
             });
         }
 
@@ -396,13 +452,14 @@ public static class DefragEngine
     ///  2. 介质决定基础操作：HDD 用 /D（传统碎片整理，真正合并碎片）；
     ///     SSD 与无法识别的介质用 /O（按介质优化，SSD 上是 retrim/优化，不做全盘整理）；
     ///     /O 与 /D、/X 互斥，按介质优先，绝不并存；
-    ///  3. /X（空闲空间合并）只在 HDD 且必须与 /D 搭配；仅当碎片率 ≥ 10% 且空闲空间 ≥ 10%
-    ///     时追加，否则只跑 /D，避免无意义的长时间空闲空间搬移；
+    ///  3. /X（空闲空间合并）只在 HDD 且必须与 /D 搭配；仅当碎片率 ≥ 5%、空闲空间 ≥ 10% 且 ≥1GB、
+    ///     空闲碎片度 ≥ 5% 时追加，否则只跑 /D，避免无意义的长时间空闲空间搬移；
     ///  4. /H（普通优先级）只对 HDD 有意义：HDD 固定追加，SSD 的 /O 不加；
     ///  5. 介质无法识别时按 SSD 保守处理（只 /O），避免误对固态盘做全盘整理。
     /// </summary>
     private static DefragPlan BuildPlan(
-        string drive, DiskMediaKind media, double? preFrag, long volumeBytes, long freeBytes, int clusterBytes)
+        string drive, DiskMediaKind media, double? preFrag, long volumeBytes, long freeBytes, int clusterBytes,
+        MergeGate? mergeGate = null)
     {
         var largeCluster = DiskService.IsLargeCluster(clusterBytes);
         var prefix = largeCluster
@@ -411,32 +468,62 @@ public static class DefragEngine
 
         if (media == DiskMediaKind.Hdd)
         {
-            var freeRatio = volumeBytes > 0 ? freeBytes * 100.0 / volumeBytes : 0.0;
-            var merge = preFrag is not null &&
-                        preFrag.Value >= MergeFreeSpaceFragThreshold &&
-                        freeRatio >= MergeFreeSpaceFreeRatio;
-
-            string reason;
-            if (preFrag is null)
-            {
-                reason = "机械硬盘：执行真正的碎片整理（/D）；读取不到碎片情况，无法判断是否需要合并空闲空间，因此本次不启用 /X";
-            }
-            else if (merge)
-            {
-                reason = $"机械硬盘：执行真正的碎片整理（/D）；碎片 {preFrag:0.##}% ≥ {MergeFreeSpaceFragThreshold:0}% 且空闲 {freeRatio:0.#}% ≥ {MergeFreeSpaceFreeRatio:0}%，同时合并空闲空间（/X）";
-            }
-            else
-            {
-                reason = $"机械硬盘：执行真正的碎片整理（/D）；碎片 {preFrag:0.##}% 或空闲 {freeRatio:0.#}% 未达到合并空闲空间的条件，只整理碎片";
-            }
-
-            return new DefragPlan(drive, media, merge ? "/D /X /H" : "/D /H", "整理", prefix + reason, clusterBytes);
+            var gate = mergeGate ?? EvaluateMergeGate(true, media, preFrag, volumeBytes, freeBytes, null);
+            var reason = gate.Reason;
+            return new DefragPlan(drive, media, gate.Allowed ? "/D /X /H" : "/D /H",
+                "整理", prefix + reason, clusterBytes);
         }
 
         var reasonSsd = media == DiskMediaKind.Ssd
             ? "固态硬盘：只做优化（/O，含 TRIM），不做全盘整理，避免额外写入影响寿命"
             : "无法识别磁盘类型，按固态硬盘保守处理：只做优化（/O），不做全盘整理";
         return new DefragPlan(drive, media, "/O", "优化", prefix + reasonSsd, clusterBytes);
+    }
+
+    /// <summary>
+    /// 机械盘空闲空间合并（/X）的门槛评估。只有同时满足以下条件才执行：
+    ///   1. 设置开关打开；
+    ///   2. 介质明确是机械硬盘（固态/未知介质绝不执行）；
+    ///   3. 碎片率 ≥ 5%；
+    ///   4. 空闲空间 ≥ 10% 且 ≥ 1GB；
+    ///   5. 读到卷位图时，空闲碎片度 ≥ 5%（空闲空间已经很连续时不做无谓搬移）。
+    /// 返回文本同时用于日志、进度和报告，避免“为什么没做”无从解释。
+    /// </summary>
+    public static MergeGate EvaluateMergeGate(
+        bool enabled, DiskMediaKind media, double? fragPercent,
+        long volumeBytes, long freeBytes, VolumeLayout? freeLayout)
+    {
+        var freeRatio = volumeBytes > 0 ? freeBytes * 100.0 / volumeBytes : 0.0;
+        var freeFrag = freeLayout?.FreeFragmentationPercent;
+
+        if (!enabled)
+            return new MergeGate(false, "机械硬盘空闲空间合并已关闭（设置里可重新开启）", fragPercent, freeRatio, freeFrag);
+        if (media != DiskMediaKind.Hdd)
+            return new MergeGate(false, $"仅机械硬盘执行空闲空间合并（当前介质：{DiskService.MediaText(media)}）", fragPercent, freeRatio, freeFrag);
+        if (fragPercent is null)
+            return new MergeGate(false, "读取不到碎片率，无法确认是否需要合并空闲空间，本次只整理碎片", fragPercent, freeRatio, freeFrag);
+        if (fragPercent.Value < MergeFreeSpaceFragThreshold)
+            return new MergeGate(false,
+                $"碎片率 {fragPercent:0.##}% 低于合并门槛 {MergeFreeSpaceFragThreshold:0}%，本次只整理碎片（/D）",
+                fragPercent, freeRatio, freeFrag);
+        if (freeBytes < MergeFreeSpaceMinFreeBytes)
+            return new MergeGate(false,
+                $"空闲空间 {DiskService.FormatBytes(freeBytes)} 少于 {DiskService.FormatBytes(MergeFreeSpaceMinFreeBytes)}，合并收益太小，本次只整理碎片",
+                fragPercent, freeRatio, freeFrag);
+        if (freeRatio < MergeFreeSpaceFreeRatio)
+            return new MergeGate(false,
+                $"空闲空间占比 {freeRatio:0.#}% 低于合并门槛 {MergeFreeSpaceFreeRatio:0}%，本次只整理碎片",
+                fragPercent, freeRatio, freeFrag);
+        if (freeFrag is not null && freeFrag.Value < MergeFreeSpaceFreeFragThreshold)
+            return new MergeGate(false,
+                $"空闲碎片度 {freeFrag:0.##}% 低于合并门槛 {MergeFreeSpaceFreeFragThreshold:0}%（空闲空间已足够连续），本次只整理碎片",
+                fragPercent, freeRatio, freeFrag);
+
+        var freeFragText = freeFrag is null ? "空闲碎片度未知" : $"空闲碎片度 {freeFrag:0.##}%";
+        return new MergeGate(true,
+            $"机械硬盘：碎片 {fragPercent:0.##}% ≥ {MergeFreeSpaceFragThreshold:0}%、空闲 {freeRatio:0.#}% ≥ {MergeFreeSpaceFreeRatio:0}%、{freeFragText}，" +
+            $"本次先合并空闲空间（/X）再整理碎片（/D）",
+            fragPercent, freeRatio, freeFrag);
     }
 
     private static DriveRunResult RunOneDrive(
@@ -621,6 +708,10 @@ public static class DefragEngine
         var output = capture.Text;
         var errorCode = FindErrorCode(output);
         var status = stopped ? "已停止" : ClassifyResult(plan, preFrag, exitCode, errorCode, output, elapsed);
+        if (errorCode is not null)
+        {
+            Logger.Warn($"{drive} {plan.Verb}错误码解释: {errorCode} -> {DefragResultCodes.Describe(errorCode)}");
+        }
 
         Logger.Info($"{drive} {plan.Verb}结束: 命令=defrag.exe {plan.CommandLine}, exit={FormatExit(exitCode)}, 状态={status}, 暂停={suspended}次, 继续={resumed}次, 用时={elapsed.TotalSeconds:N0}s");
         if (errorCode is not null)
@@ -630,7 +721,69 @@ public static class DefragEngine
         Logger.Info($"{drive} 整理程序输出片段: {(output.Length == 0 ? "(无输出)" : ClipForLog(output))}");
         ProgressLog.Append($"{drive} {plan.Verb}结束: 状态={status}, exit={FormatExit(exitCode)}, 用时={elapsed.TotalSeconds:N0}s");
 
-        return new DriveRunResult(drive, plan.Media, plan.Arguments, exitCode, suspended, resumed, startTime, endTime, status, null, null, plan.ClusterBytes);
+        return new DriveRunResult(drive, plan.Media, plan.Arguments, exitCode, suspended, resumed, startTime, endTime, status, null, null, plan.ClusterBytes,
+            ErrorCode: errorCode);
+    }
+
+    /// <summary>
+    /// 大簇卷文件级整理前的空闲空间合并（/X）。
+    /// 只接受机械硬盘调用；与文件重写共用同一套 CPU 守护、停止标记、进度与日志通道。
+    /// 顺序上先 /X 再重写：/X 会把数据搬进更靠前的连续空闲区，为后续文件重写留下大段连续空间，
+    /// 若反过来先重写、再 /X，重写产生的临时文件与备份会把空闲空间重新打散，合并效果被抵消。
+    /// </summary>
+    public static MergeRunResult RunFreeSpaceMerge(
+        string drive, int cpuThreshold, int highSeconds, int lowSeconds, WorkerStateFile state)
+    {
+        var clusterBytes = Native.GetClusterSize(drive);
+        var plan = new DefragPlan(drive, DiskMediaKind.Hdd, "/X /H", "合并空闲空间",
+            "机械硬盘空闲空间合并（/X）；只移动文件位置，不改文件内容", clusterBytes);
+
+        Logger.Info($"{drive} 开始合并空闲空间: defrag.exe {plan.CommandLine}（CPU 守护 {cpuThreshold}%）");
+        ProgressLog.Append($"{drive} 开始合并空闲空间（/X）：CPU > {cpuThreshold}% 连续 {highSeconds}s 暂停，回落稳定 {lowSeconds}s 继续");
+        state.Stage = "合并空闲空间";
+        state.Phase = string.Empty;
+        state.Message = $"正在合并 {drive} 的空闲空间（/X）";
+        state.Percent = -1;
+        state.Save();
+
+        var run = RunOneDrive(drive, plan, null, cpuThreshold, highSeconds, lowSeconds, state);
+        var status = run.Status switch
+        {
+            "成功" => "成功",
+            "已停止" => "已停止",
+            "可能不支持" => "可能不支持",
+            "无法确认" => "无法确认",
+            _ => "失败"
+        };
+
+        var detail = status switch
+        {
+            "成功" => "空闲空间合并完成",
+            "失败" => $"空闲空间合并失败（exit={FormatExit(run.ExitCode)}, 错误码={run.ErrorCode ?? "无"}）",
+            "已停止" => "空闲空间合并被用户停止",
+            "可能不支持" => "系统未报告实际搬移证据，可能不支持该卷的 /X；本次结果不按成功计",
+            _ => "系统报告成功但没有可确认的搬移证据"
+        };
+
+        Logger.Info($"{drive} 合并空闲空间结束: 状态={status}, exit={FormatExit(run.ExitCode)}, 错误码={run.ErrorCode ?? "无"}, " +
+                    $"暂停={run.Suspended}次, 继续={run.Resumed}次, 用时={(run.EndTime - run.StartTime).TotalSeconds:N0}s；{detail}");
+        ProgressLog.Append($"{drive} 合并空闲空间结束：{status}（exit={FormatExit(run.ExitCode)}）");
+
+        return new MergeRunResult(status, run.ExitCode, run.ErrorCode, run.Suspended, run.Resumed,
+            run.StartTime, run.EndTime, detail);
+    }
+
+    /// <summary>
+    /// 对外口径：执行只读 defrag &lt;drive&gt; /A 并返回整卷碎片率。
+    /// 与整理共用 CPU 守护与停止标记；/A 失败时返回退出码/错误码，绝不编造数值。
+    /// </summary>
+    public static ExternalFragResult AnalyzeFrag(
+        string drive, long volumeBytes, int cpuThreshold, int highSeconds, int lowSeconds,
+        WorkerStateFile state, string stage)
+    {
+        var probe = Probe(drive, volumeBytes, cpuThreshold, highSeconds, lowSeconds, state, stage);
+        return new ExternalFragResult(probe.FragPercent, probe.ExitCode, FindErrorCode(probe.Output),
+            probe.Stopped, probe.Output);
     }
 
     private static bool HasExited(System.Diagnostics.Process process)
@@ -685,16 +838,20 @@ public static class DefragEngine
             try { exitCode = process.ExitCode; } catch { }
 
             var output = capture.Text;
-            var frag = ParseFragPercent(output, volumeBytes);
+            var parsed = DefragOutputParser.Parse(output, volumeBytes);
+            var frag = parsed.Percent;
             var errorCode = FindErrorCode(output);
 
             if (frag is null)
             {
-                Logger.Warn($"读取碎片情况失败({drive}): exit={FormatExit(exitCode)}, 错误码={errorCode ?? "无"}, 输出片段=\"{ClipForLog(output)}\"");
+                // 解析失败只降级为“未知”：不推断成 0%、不判定“无需整理”、也不影响退出码判断
+                Logger.Warn($"读取碎片情况失败({drive}): exit={FormatExit(exitCode)}, 错误码={errorCode ?? "无"}, " +
+                            $"解析={parsed.Method}，按“未知”处理（不据此跳过或判定成功），输出片段=\"{ClipForLog(output)}\"");
             }
             else if (errorCode is not null)
             {
-                Logger.Warn($"读取碎片情况时输出包含错误码 {errorCode}({drive}): exit={FormatExit(exitCode)}，但碎片仍解析为 {frag:0.##}%");
+                Logger.Warn($"读取碎片情况时输出包含错误码 {errorCode}({drive}, {DefragResultCodes.Describe(errorCode)}): " +
+                            $"exit={FormatExit(exitCode)}，但碎片仍解析为 {frag:0.##}%（{parsed.Method}）");
             }
 
             return new ProbeResult(frag, exitCode, output, guard.Suspended, guard.Resumed, guard.Stopped);
@@ -903,63 +1060,13 @@ public static class DefragEngine
     }
 
     /// <summary>
-    /// 解析 defrag 报告：优先认 "Total fragmented space = N%"；
-    /// 若值是容量则按 /卷大小 换算；键名被本地化时退化为报告中第一个 "= N%"。
+    /// 解析 defrag 报告中的整卷碎片率。
+    /// 具体规则在 DefragOutputParser：优先匹配“碎片空间”类键名，键名不认识时只在
+    /// 全报告唯一一个百分比时采用；出现歧义或解析失败返回 null（未知），
+    /// 调用方不得据此判定成功或“无需整理”。
     /// </summary>
-    public static double? ParseFragPercent(string report, long volumeBytes)
-    {
-        if (string.IsNullOrWhiteSpace(report)) return null;
-
-        double? anyPercent = null;
-        foreach (var rawLine in report.Split('\n'))
-        {
-            var line = rawLine.Trim();
-            if (line.Length == 0) continue;
-
-            var eq = line.IndexOf('=');
-            if (eq < 0) continue;
-
-            var key = line[..eq].Trim();
-            var value = line[(eq + 1)..].Trim();
-            if (value.Length == 0) continue;
-
-            var isFragKey = FragKeyRegex.IsMatch(key);
-
-            var percentMatch = PercentValueRegex.Match(value);
-            if (percentMatch.Success)
-            {
-                var number = ParseNumber(percentMatch.Groups[1].Value);
-                if (isFragKey) return number;
-                anyPercent ??= number;
-                continue;
-            }
-
-            if (isFragKey && volumeBytes > 0)
-            {
-                var sizeMatch = SizeValueRegex.Match(value);
-                if (sizeMatch.Success)
-                {
-                    var multiplier = sizeMatch.Groups[2].Value.ToUpperInvariant() switch
-                    {
-                        "TB" => 1099511627776.0,
-                        "GB" => 1073741824.0,
-                        "MB" => 1048576.0,
-                        "KB" => 1024.0,
-                        _ => 1.0
-                    };
-                    var bytes = ParseNumber(sizeMatch.Groups[1].Value) * multiplier;
-                    return Math.Round(bytes / volumeBytes * 100, 2);
-                }
-            }
-        }
-
-        return anyPercent;
-    }
-
-    private static double ParseNumber(string raw) =>
-        double.TryParse(raw.Replace(",", string.Empty), NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
-            ? value
-            : 0.0;
+    public static double? ParseFragPercent(string report, long volumeBytes) =>
+        DefragOutputParser.Parse(report, volumeBytes).Percent;
 
     /// <summary>规范化盘符并只保留本机存在的固定磁盘。</summary>
     private static List<string> FilterToFixed(string[] drives, bool allowAllWhenEmpty = false)
@@ -974,7 +1081,7 @@ public static class DefragEngine
             foreach (var part in Regex.Split(entry ?? string.Empty, @"[,;\s]+"))
             {
                 var letter = part.Trim().TrimEnd('\\').ToUpperInvariant();
-                if (letter.Length > 0) requested.Add(letter);
+                if (letter.Length > 0 && DiskService.IsValidDriveSpec(letter)) requested.Add(letter);
             }
         }
 
@@ -1031,6 +1138,41 @@ public static class DefragEngine
         catch (Exception ex)
         {
             Logger.Warn("清理停止标记失败: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 把本次真实整理的结果回填到 drive_status.json。
+    /// 只更新历史三字段，保留检查磁盘写入的容量/空闲/碎片率；盘符换了盘时按最新结果覆盖，
+    /// 因为当前数据模型没有卷序列号，无法区分“同一盘符的新盘”。
+    /// </summary>
+    private static void UpdateDriveHistory(IReadOnlyList<DriveRunResult> results)
+    {
+        if (results.Count == 0) return;
+
+        try
+        {
+            var file = DriveStatusFile.TryLoad() ?? new DriveStatusFile();
+            foreach (var result in results)
+            {
+                var entry = file.Drives.FirstOrDefault(d =>
+                    string.Equals(d.Drive, result.Drive, StringComparison.OrdinalIgnoreCase));
+                if (entry is null)
+                {
+                    entry = new DriveStatusEntry { Drive = result.Drive };
+                    file.Drives.Add(entry);
+                }
+
+                entry.LastRunAt = result.EndTime.ToString("yyyy-MM-dd HH:mm:ss");
+                entry.LastRunStatus = result.Status;
+                entry.LastErrorCode = result.ErrorCode ?? string.Empty;
+            }
+
+            file.Save();
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn("更新 drive_status.json 历史字段失败: " + ex.Message);
         }
     }
 
@@ -1122,7 +1264,40 @@ public sealed record DefragPlan(
     int ClusterBytes)
 {
     public string CommandLine => $"{Drive} {Arguments}";
+
+    /// <summary>本次命令是否包含 /X（空闲空间合并）。</summary>
+    public bool MergeRequested => Arguments.Contains("/X", StringComparison.OrdinalIgnoreCase);
 }
+
+/// <summary>机械盘空闲空间合并的门槛评估结果；Reason 直接用于日志/报告。</summary>
+public sealed record MergeGate(
+    bool Allowed,
+    string Reason,
+    double? FragPercent,
+    double FreeRatio,
+    double? FreeFragPercent);
+
+/// <summary>/X 单步执行结果（与文件重写分开记录，失败不会被记成成功）。</summary>
+public sealed record MergeRunResult(
+    string Status,
+    int? ExitCode,
+    string? ErrorCode,
+    int Suspended,
+    int Resumed,
+    DateTime StartTime,
+    DateTime EndTime,
+    string Detail)
+{
+    public double ElapsedSeconds => (EndTime - StartTime).TotalSeconds;
+}
+
+/// <summary>defrag /A 的只读探测结果；FragPercent 为 null 表示系统没有给出可用数值。</summary>
+public sealed record ExternalFragResult(
+    double? FragPercent,
+    int? ExitCode,
+    string? ErrorCode,
+    bool Stopped,
+    string Output);
 
 public sealed record DriveRunResult(
     string Drive,
@@ -1138,4 +1313,10 @@ public sealed record DriveRunResult(
     double? PostFrag,
     int ClusterBytes = 0,
     double? CoveragePercent = null,
-    int Rounds = 0);
+    int Rounds = 0,
+    string? ErrorCode = null,
+    string MergeStatus = "未启用",
+    string MergeDetail = "",
+    double? WinFragBefore = null,
+    double? WinFragAfter = null,
+    string WinFragNote = "");

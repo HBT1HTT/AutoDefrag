@@ -9,7 +9,7 @@ namespace AutoDefrag;
 /// </summary>
 public sealed class AppConfig
 {
-    public int ConfigVersion { get; set; } = 7;
+    public int ConfigVersion { get; set; } = 8;
 
     /// <summary>CPU 守护阈值(%)：高于该值时挂起 defrag。</summary>
     public int CpuThreshold { get; set; } = 70;
@@ -78,11 +78,11 @@ public sealed class AppConfig
     /// <summary>最小处理文件大小（KB），4–4096，默认 32（均衡档）。0 表示按“最小簇数”旧规则。</summary>
     public int MinFileSizeKB { get; set; } = 32;
 
-    /// <summary>单轮最多处理文件数，10–500，默认 80（均衡档）。</summary>
-    public int MaxFilesPerRun { get; set; } = 80;
+    /// <summary>单轮最多处理文件数，10–500，默认 100（均衡档）。</summary>
+    public int MaxFilesPerRun { get; set; } = 100;
 
-    /// <summary>单轮最多复制数据量（GB），1–64，默认 16（均衡档）。</summary>
-    public int MaxBytesPerRunGB { get; set; } = 16;
+    /// <summary>单轮最多复制数据量（GB），1–64，默认 20（均衡档）。</summary>
+    public int MaxBytesPerRunGB { get; set; } = 20;
 
     /// <summary>单文件可回收碎片空间下限（MB），0–64，默认 4（均衡档）。</summary>
     public int MinReclaimMB { get; set; } = 4;
@@ -90,17 +90,24 @@ public sealed class AppConfig
     /// <summary>整理后校验方式：Auto（≤2GB 全量，超过抽样）/ Full（总是全量）/ Sample（总是抽样首中尾 4MB）。</summary>
     public string VerifyMode { get; set; } = "Auto";
 
-    /// <summary>多轮整理上限（每轮重新扫描候选），1–10，默认 3（均衡档）。</summary>
-    public int MaxRounds { get; set; } = 3;
+    /// <summary>多轮整理上限（每轮重新扫描候选），1–10，默认 4（均衡档）。</summary>
+    public int MaxRounds { get; set; } = 4;
 
-    /// <summary>整个任务总时长上限（分钟），0 = 不限，默认 120（均衡档）。达到上限后不再开始新的一轮。</summary>
-    public int MaxRunMinutes { get; set; } = 120;
+    /// <summary>整个任务总时长上限（分钟），0 = 不限，默认 180（均衡档）。达到上限后不再开始新的一轮。</summary>
+    public int MaxRunMinutes { get; set; } = 180;
 
     /// <summary>
     /// 固态硬盘上的大簇卷只做系统优化（/O），不做文件级重写，避免无谓写入磨损。
     /// 默认开启；机械硬盘不受影响。仅“本程序整理/自动（大簇盘）”路径读取该开关。
     /// </summary>
     public bool SsdOptimizeOnly { get; set; } = true;
+
+    /// <summary>
+    /// 机械硬盘整理时合并空闲空间（defrag /X）。仅机械硬盘生效，固态与未知介质绝不执行。
+    /// 默认开启；是否真正执行还要同时满足碎片率、空闲空间占比与空闲碎片度门槛，
+    /// 不满足时只在日志/报告写明原因，不跑长时间的空闲搬移。
+    /// </summary>
+    public bool MergeFreeSpace { get; set; } = true;
 
     /// <summary>
     /// 整理任务真正完成时播放一段约 1 秒的提示音（失败、被停止时不播放）。
@@ -129,12 +136,12 @@ public sealed class AppConfig
         if (FragThresholdPercent < 1 || FragThresholdPercent > 15) FragThresholdPercent = 10;
         if (!DefragQualityPresets.IsValid(DefragQuality)) DefragQuality = DefragQualityPresets.Balanced;
         if (MinFileSizeKB < 4 || MinFileSizeKB > 4096) MinFileSizeKB = 32;
-        if (MaxFilesPerRun < 10 || MaxFilesPerRun > 500) MaxFilesPerRun = 80;
-        if (MaxBytesPerRunGB < 1 || MaxBytesPerRunGB > 64) MaxBytesPerRunGB = 16;
+        if (MaxFilesPerRun < 10 || MaxFilesPerRun > 500) MaxFilesPerRun = 100;
+        if (MaxBytesPerRunGB < 1 || MaxBytesPerRunGB > 64) MaxBytesPerRunGB = 20;
         if (MinReclaimMB < 0 || MinReclaimMB > 64) MinReclaimMB = 4;
         if (VerifyMode is not ("Auto" or "Full" or "Sample")) VerifyMode = "Auto";
-        if (MaxRounds < 1 || MaxRounds > 10) MaxRounds = 3;
-        if (MaxRunMinutes < 0 || MaxRunMinutes > 1440) MaxRunMinutes = 120;
+        if (MaxRounds < 1 || MaxRounds > 10) MaxRounds = 4;
+        if (MaxRunMinutes < 0 || MaxRunMinutes > 1440) MaxRunMinutes = 180;
         UiFont = (UiFont ?? string.Empty).Trim();
 
         if (SelectedDrives is not null)
@@ -152,17 +159,18 @@ public sealed class AppConfig
 
     /// <summary>当前配置对应的整理偏好（界面草稿与 worker 参数都从这里取）。</summary>
     public DefragPreferences GetDefragPreferences() => new(
-        DefragQuality, FragThresholdEnabled, FragThresholdPercent,
+        DefragQuality,
         MinFileSizeKB, MaxFilesPerRun, MaxBytesPerRunGB, MinReclaimMB,
-        VerifyMode, MaxRounds, MaxRunMinutes, SsdOptimizeOnly);
+        VerifyMode, MaxRounds, MaxRunMinutes, SsdOptimizeOnly, MergeFreeSpace);
 
-    /// <summary>写回整理偏好：先规范化（非法值回落默认），再同步到字段。</summary>
+    /// <summary>
+    /// 写回整理偏好：先规范化（非法值回落默认），再同步到字段。
+    /// 文件碎片率阈值是独立设置（设置窗口单独写回），不在这里被档位覆盖。
+    /// </summary>
     public void ApplyDefragPreferences(DefragPreferences prefs)
     {
         var p = prefs.Normalized();
         DefragQuality = p.Quality;
-        FragThresholdEnabled = p.FragThresholdEnabled;
-        FragThresholdPercent = p.FragThresholdPercent;
         MinFileSizeKB = p.MinFileSizeKB;
         MaxFilesPerRun = p.MaxFilesPerRun;
         MaxBytesPerRunGB = p.MaxBytesPerRunGB;
@@ -171,6 +179,7 @@ public sealed class AppConfig
         MaxRounds = p.MaxRounds;
         MaxRunMinutes = p.MaxRunMinutes;
         SsdOptimizeOnly = p.SsdOptimizeOnly;
+        MergeFreeSpace = p.MergeFreeSpace;
         Normalize();
     }
 }
@@ -178,8 +187,6 @@ public sealed class AppConfig
 /// <summary>整理偏好快照：设置窗口、配置迁移与 worker 参数共用同一份结构。</summary>
 public sealed record DefragPreferences(
     string Quality,
-    bool FragThresholdEnabled,
-    int FragThresholdPercent,
     int MinFileSizeKB,
     int MaxFilesPerRun,
     int MaxBytesPerRunGB,
@@ -187,7 +194,8 @@ public sealed record DefragPreferences(
     string VerifyMode,
     int MaxRounds,
     int MaxRunMinutes,
-    bool SsdOptimizeOnly)
+    bool SsdOptimizeOnly,
+    bool MergeFreeSpace = true)
 {
     public static DefragPreferences Default => DefragQualityPresets.Get(DefragQualityPresets.Balanced).ToPreferences();
 
@@ -195,14 +203,13 @@ public sealed record DefragPreferences(
     public DefragPreferences Normalized() => this with
     {
         Quality = DefragQualityPresets.IsValid(Quality) ? Quality : DefragQualityPresets.Balanced,
-        FragThresholdPercent = FragThresholdPercent is >= 1 and <= 15 ? FragThresholdPercent : 10,
         MinFileSizeKB = MinFileSizeKB is >= 4 and <= 4096 ? MinFileSizeKB : 32,
-        MaxFilesPerRun = MaxFilesPerRun is >= 10 and <= 500 ? MaxFilesPerRun : 80,
-        MaxBytesPerRunGB = MaxBytesPerRunGB is >= 1 and <= 64 ? MaxBytesPerRunGB : 16,
+        MaxFilesPerRun = MaxFilesPerRun is >= 10 and <= 500 ? MaxFilesPerRun : 100,
+        MaxBytesPerRunGB = MaxBytesPerRunGB is >= 1 and <= 64 ? MaxBytesPerRunGB : 20,
         MinReclaimMB = MinReclaimMB is >= 0 and <= 64 ? MinReclaimMB : 4,
         VerifyMode = VerifyMode is "Auto" or "Full" or "Sample" ? VerifyMode : "Auto",
-        MaxRounds = MaxRounds is >= 1 and <= 10 ? MaxRounds : 3,
-        MaxRunMinutes = MaxRunMinutes is >= 0 and <= 1440 ? MaxRunMinutes : 120
+        MaxRounds = MaxRounds is >= 1 and <= 10 ? MaxRounds : 4,
+        MaxRunMinutes = MaxRunMinutes is >= 0 and <= 1440 ? MaxRunMinutes : 180
     };
 }
 
@@ -216,26 +223,23 @@ public sealed record DefragQualityPreset(
     int MaxBytesPerRunGB,
     int MinReclaimMB,
     string VerifyMode,
-    bool FragThresholdEnabled,
-    int FragThresholdPercent,
     int MaxRounds,
     int MaxRunMinutes)
 {
     public bool IsNamed => Key is "Fast" or "Balanced" or "Thorough";
 
     public DefragPreferences ToPreferences() => new(
-        Key, FragThresholdEnabled, FragThresholdPercent,
-        MinFileSizeKB, MaxFilesPerRun, MaxBytesPerRunGB, MinReclaimMB,
-        VerifyMode, MaxRounds, MaxRunMinutes, SsdOptimizeOnly: true);
+        Key, MinFileSizeKB, MaxFilesPerRun, MaxBytesPerRunGB, MinReclaimMB,
+        VerifyMode, MaxRounds, MaxRunMinutes, SsdOptimizeOnly: true, MergeFreeSpace: true);
 }
 
 /// <summary>
-/// 三档预设的数值与依据：
-/// 最快   —— 只处理碎片率高（≥10%）、体积大（≥256KB）、收益明显（≥16MB）的文件，单轮 20 文件/4GB，
+/// 三档预设的数值与依据（这三档是“最小文件/单轮上限/可回收下限/校验/轮次/时长”的唯一入口）：
+/// 最快   —— 只处理体积大（≥256KB）、收益明显（≥16MB）的文件，单轮 20 文件/4GB，1 轮，
 ///           抽样校验；候选池最小，适合“先快速缓解卡顿”。
-/// 均衡   —— 默认档。32KB 门槛、单轮 80 文件/16GB、最多 3 轮、自动校验（≤2GB 全量，超过抽样）；
-///           大致是旧版单批 40 文件/8GB 的两倍覆盖，叠加最多 3 轮。
-/// 最彻底 —— 4KB 门槛（64KB 簇盘仍按 1 簇=64KB）、单轮 300 文件/32GB、最多 8 轮、全量校验；
+/// 均衡   —— 默认档。32KB 门槛、单轮 100 文件/20GB、最多 4 轮、自动校验（≤2GB 全量，超过抽样）；
+///           正常候选跑完后自动进入“补扫轮”，把被可回收下限挡掉的小碎片也纳入，直到收敛或达到轮次上限。
+/// 最彻底 —— 4KB 门槛（64KB 簇盘按 1 簇=64KB 放宽）、单轮 400 文件/48GB、最多 8 轮、全量校验；
 ///           读放大最高，耗时最长，建议空闲时运行。
 /// </summary>
 public static class DefragQualityPresets
@@ -247,24 +251,21 @@ public static class DefragQualityPresets
 
     public static readonly DefragQualityPreset FastPreset = new(
         Fast, "最快",
-        "只处理碎片率高、体积大的文件；单轮 1 轮、抽样校验。耗时最短，适合快速缓解卡顿。",
+        "只处理体积大、收益高的文件；1 轮、抽样校验。耗时最短，适合快速缓解卡顿。",
         MinFileSizeKB: 256, MaxFilesPerRun: 20, MaxBytesPerRunGB: 4, MinReclaimMB: 16,
-        VerifyMode: "Sample", FragThresholdEnabled: true, FragThresholdPercent: 10,
-        MaxRounds: 1, MaxRunMinutes: 30);
+        VerifyMode: "Sample", MaxRounds: 1, MaxRunMinutes: 30);
 
     public static readonly DefragQualityPreset BalancedPreset = new(
         Balanced, "均衡",
-        "默认。32KB 门槛、单轮 80 文件/16GB、最多 3 轮、自动校验。覆盖与耗时折中。",
-        MinFileSizeKB: 32, MaxFilesPerRun: 80, MaxBytesPerRunGB: 16, MinReclaimMB: 4,
-        VerifyMode: "Auto", FragThresholdEnabled: false, FragThresholdPercent: 10,
-        MaxRounds: 3, MaxRunMinutes: 120);
+        "默认。32KB 门槛、单轮 100 文件/20GB、最多 4 轮、自动校验；自动补扫小碎片直到收敛。",
+        MinFileSizeKB: 32, MaxFilesPerRun: 100, MaxBytesPerRunGB: 20, MinReclaimMB: 4,
+        VerifyMode: "Auto", MaxRounds: 4, MaxRunMinutes: 180);
 
     public static readonly DefragQualityPreset ThoroughPreset = new(
         Thorough, "最彻底",
-        "门槛最低、最多 8 轮、全量校验。尽量少碎片，耗时最长，建议空闲时使用。",
-        MinFileSizeKB: 4, MaxFilesPerRun: 300, MaxBytesPerRunGB: 32, MinReclaimMB: 1,
-        VerifyMode: "Full", FragThresholdEnabled: false, FragThresholdPercent: 5,
-        MaxRounds: 8, MaxRunMinutes: 480);
+        "门槛最低、最多 8 轮、全量校验；自动补扫小碎片直到收敛。尽量少碎片，耗时最长，建议空闲时使用。",
+        MinFileSizeKB: 4, MaxFilesPerRun: 400, MaxBytesPerRunGB: 48, MinReclaimMB: 1,
+        VerifyMode: "Full", MaxRounds: 8, MaxRunMinutes: 480);
 
     public static IReadOnlyList<DefragQualityPreset> Named => new[]
     {
@@ -282,7 +283,7 @@ public static class DefragQualityPresets
         _ => BalancedPreset
     };
 
-    /// <summary>当前参数与哪一档完全一致；都不一致返回 null（界面显示“自定义”）。</summary>
+    /// <summary>当前参数与哪一档完全一致；都不一致返回 null（旧配置中的“自定义”）。</summary>
     public static DefragQualityPreset? Match(DefragPreferences prefs)
     {
         foreach (var preset in Named)
@@ -292,14 +293,50 @@ public static class DefragQualityPresets
         return null;
     }
 
+    /// <summary>
+    /// 旧版“自定义”配置迁移用：按数值距离找最接近的一档。
+    /// 各项按相对偏差比较，避免“文件数 500”这种大数值单方面主导结果。
+    /// </summary>
+    public static DefragQualityPreset Nearest(DefragPreferences p)
+    {
+        DefragQualityPreset? best = null;
+        var bestDistance = double.MaxValue;
+
+        foreach (var preset in Named)
+        {
+            double distance = 0;
+            distance += RatioDistance(p.MinFileSizeKB, preset.MinFileSizeKB);
+            distance += RatioDistance(p.MaxFilesPerRun, preset.MaxFilesPerRun);
+            distance += RatioDistance(p.MaxBytesPerRunGB, preset.MaxBytesPerRunGB);
+            distance += RatioDistance(p.MinReclaimMB, preset.MinReclaimMB);
+            distance += RatioDistance(p.MaxRounds, preset.MaxRounds);
+            distance += RatioDistance(p.MaxRunMinutes == 0 ? 1440 : p.MaxRunMinutes,
+                preset.MaxRunMinutes == 0 ? 1440 : preset.MaxRunMinutes);
+            if (p.VerifyMode != preset.VerifyMode) distance += 0.5;
+
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = preset;
+            }
+        }
+
+        return best ?? BalancedPreset;
+    }
+
+    private static double RatioDistance(double value, double reference)
+    {
+        var max = Math.Max(Math.Abs(value), Math.Abs(reference));
+        if (max <= 0) return 0;
+        return Math.Abs(value - reference) / max;
+    }
+
     public static bool EqualsPreset(DefragQualityPreset preset, DefragPreferences p) =>
         p.MinFileSizeKB == preset.MinFileSizeKB
         && p.MaxFilesPerRun == preset.MaxFilesPerRun
         && p.MaxBytesPerRunGB == preset.MaxBytesPerRunGB
         && p.MinReclaimMB == preset.MinReclaimMB
         && p.VerifyMode == preset.VerifyMode
-        && p.FragThresholdEnabled == preset.FragThresholdEnabled
-        && p.FragThresholdPercent == preset.FragThresholdPercent
         && p.MaxRounds == preset.MaxRounds
         && p.MaxRunMinutes == preset.MaxRunMinutes;
 }

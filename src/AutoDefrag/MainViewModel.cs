@@ -635,7 +635,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Logger.Info($"整理设置已保存: 质量={_config.DefragQuality}, 最小文件={_config.MinFileSizeKB}KB, " +
                     $"单轮≤{_config.MaxFilesPerRun}文件/{_config.MaxBytesPerRunGB}GB, 可回收≥{_config.MinReclaimMB}MB, " +
                     $"校验={_config.VerifyMode}, 最多{_config.MaxRounds}轮/{_config.MaxRunMinutes}分钟, " +
-                    $"碎片率阈值={(FragThresholdEnabled ? $"≥{FragThresholdPercent}%" : "关闭")}, 固态只优化={_config.SsdOptimizeOnly}");
+                    $"碎片率阈值={(FragThresholdEnabled ? $"≥{FragThresholdPercent}%" : "关闭")}, " +
+                    $"固态只优化={(_config.SsdOptimizeOnly ? "是" : "否")}, 机械盘空闲合并={(_config.MergeFreeSpace ? "是" : "否")}");
         OnPropertyChanged(nameof(FragThresholdEnabled));
         OnPropertyChanged(nameof(FragThresholdPercent));
         OnPropertyChanged(nameof(FragThresholdText));

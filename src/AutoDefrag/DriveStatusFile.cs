@@ -56,4 +56,13 @@ public sealed class DriveStatusEntry
     public double? FreeSpaceGB { get; set; }
     public double? FragPercent { get; set; }
     public bool Probed { get; set; }
+
+    /// <summary>最近一次真实整理结束时间（yyyy-MM-dd HH:mm:ss）；没有执行过时为空。</summary>
+    public string LastRunAt { get; set; } = string.Empty;
+
+    /// <summary>最近一次真实整理的状态（成功/失败/部分成功/已停止等，原样记录）。</summary>
+    public string LastRunStatus { get; set; } = string.Empty;
+
+    /// <summary>最近一次真实整理看到的 defrag 错误码（例如 0x89000024）；没有则为空。</summary>
+    public string LastErrorCode { get; set; } = string.Empty;
 }

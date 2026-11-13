@@ -94,7 +94,7 @@ public sealed class CandidateFile
 }
 
 /// <summary>单次重写任务的参数；dry-run 只是把 DryRun 打开。</summary>
-public sealed class RewriteOptions
+public sealed record RewriteOptions
 {
     /// <summary>只生成计划，不动盘。</summary>
     public bool DryRun { get; init; }
@@ -128,6 +128,31 @@ public sealed class RewriteOptions
 
     /// <summary>可回收碎片簇折合的字节数低于该值不参与：避免为几 MB 收益重读重写整文件。</summary>
     public long MinReclaimBytes { get; init; } = 4L * 1024 * 1024;
+
+    /// <summary>
+    /// 补扫轮是否放宽“文件太小/可回收不足”的门槛。
+    /// 正常候选处理完后自动打开，把被门槛挡掉的合理小碎片也纳入，直到收敛或达到轮次上限。
+    /// </summary>
+    public bool RelaxedFilters { get; init; }
+
+    /// <summary>补扫轮的最小文件大小（KB）；RelaxedFilters=false 时忽略。</summary>
+    public int RelaxedMinFileSizeKB { get; init; } = 1;
+
+    /// <summary>补扫轮的最小文件簇数；RelaxedFilters=false 时忽略。</summary>
+    public int RelaxedMinFileClusters { get; init; } = 1;
+
+    /// <summary>补扫轮的可回收碎片下限（字节）；RelaxedFilters=false 时忽略。</summary>
+    public long RelaxedMinReclaimBytes { get; init; } = 256L * 1024;
+
+    /// <summary>
+    /// Windows 自带 defrag /A 的统计口径：大于 64MB 的文件碎片不计入“总碎片空间”。
+    /// 打开后会优先选择 ≤64MB 且多区段的文件，并把它们的最小可回收下限放宽到 1 个簇，
+    /// 这样 /A 的整卷碎片率才会真正下降，而不是只把大文件搬到一起。
+    /// </summary>
+    public bool WindowsFragmentationFocus { get; init; }
+
+    /// <summary>Windows /A 计入碎片统计的单文件上限（64MB）。</summary>
+    public const long WindowsAnalyzedFileMaxBytes = 64L * 1024 * 1024;
 
     /// <summary>执行前额外预留的空闲簇数（0 表示按 0.5% 自动计算）。</summary>
     public long SafetyReserveClusters { get; init; }
@@ -203,6 +228,9 @@ public sealed class RewriteSummary
     public long ReclaimedFragmentedClusters =>
         Results.Where(r => r.Status == "成功")
             .Sum(r => Math.Max(0, r.BeforeFragmentedClusters - r.AfterFragmentedClusters));
+
+    /// <summary>实际执行的补扫轮次数（用于报告解释“为什么多跑了轮”）。</summary>
+    public int RelaxedRounds { get; set; }
 
     public Dictionary<string, int> SkipReasons
     {

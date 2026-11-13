@@ -8,11 +8,16 @@ namespace AutoDefrag.Rewrite;
 /// </summary>
 public static class VolumeAnalyzer
 {
-    /// <summary>这些目录下的内容一律不参与分析/整理（系统关键或回收站）。</summary>
+    /// <summary>
+    /// 这些目录下的内容一律不参与分析/整理（系统关键或回收站）。
+    /// 注意：Program Files / ProgramData 不再整目录排除——数据盘上的游戏常装在 Program Files 下，
+    /// 整目录跳过会让覆盖率长期只有 10% 左右；其中的只读/被占用/受保护文件仍会被逐文件预检跳过。
+    /// Windows 目录本身继续排除，WinSxS、注册表 hive、系统组件因此不会被触碰。
+    /// </summary>
     private static readonly HashSet<string> SkipDirectoryNames = new(StringComparer.OrdinalIgnoreCase)
     {
-        "$RECYCLE.BIN", "System Volume Information", "Windows", "Program Files", "Program Files (x86)",
-        "ProgramData", "Recovery", "PerfLogs", "Boot", "EFI", "Config.Msi", "$WinREAgent", "Windows.old"
+        "$RECYCLE.BIN", "System Volume Information", "Windows",
+        "Recovery", "PerfLogs", "Boot", "EFI", "Config.Msi", "$WinREAgent", "Windows.old"
     };
 
     private static readonly HashSet<string> SkipFileNames = new(StringComparer.OrdinalIgnoreCase)
@@ -42,15 +47,27 @@ public static class VolumeAnalyzer
 
         var guard = options.Guard;
         var deadline = DateTime.UtcNow.AddSeconds(Math.Max(options.ScanSeconds, 1));
-        var minBytes = options.MinFileSizeKB > 0
-            ? Math.Max(1L, (long)Math.Ceiling(options.MinFileSizeKB * 1024.0 / geometry.ClusterBytes)) * geometry.ClusterBytes
-            : (long)Math.Max(options.MinFileClusters, 1) * geometry.ClusterBytes;
+        var effectiveMinKb = options.RelaxedFilters ? options.RelaxedMinFileSizeKB : options.MinFileSizeKB;
+        var effectiveMinClusters = options.RelaxedFilters ? options.RelaxedMinFileClusters : options.MinFileClusters;
+        var minBytes = effectiveMinKb > 0
+            ? Math.Max(1L, (long)Math.Ceiling(effectiveMinKb * 1024.0 / geometry.ClusterBytes)) * geometry.ClusterBytes
+            : (long)Math.Max(effectiveMinClusters, 1) * geometry.ClusterBytes;
         var root = options.ScanRoot ?? drive;
         if (!root.EndsWith('\\')) root += "\\";
 
         var stop = false;
         var stack = new Stack<string>();
         stack.Push(root);
+        // 按“Windows /A 口径 + 大小”分两档优先分析：
+        //   · ≤64MB 的文件才计入 defrag /A 的总碎片空间，优先保证它们被分析到；
+        //   · >64MB 的大文件覆盖簇多，用来把覆盖率拉起来。
+        // 两档先各自收集最多 probeCap 个候选，枚举结束后再按“大文件最多占 40%”分配实际探测预算；
+        // 如果大文件很少，剩余预算自动让给小文件，不会白白浪费。
+        var probeCap = Math.Max(2, options.MaxExtentProbes);
+        var smallPending = new PriorityQueue<string, long>(probeCap);
+        var largePending = new PriorityQueue<string, long>(probeCap);
+        var archive = new List<(string Path, long Size)>();
+
         while (stack.Count > 0 && !stop)
         {
             // 枚举/目录遍历也是重 I/O：每个目录前采样一次，命中阈值就原地等待
@@ -147,38 +164,78 @@ public static class VolumeAnalyzer
                         continue;
                     }
 
-                    if (result.FilesProbed >= options.MaxExtentProbes)
-                    {
-                        result.ScanTruncated = true;
-                        stop = true;
-                        break;
-                    }
-                    result.FilesProbed++;
+                    // 两档各自只保留最大的 probeCap 个；被挤掉的明确计数，不假装全部分析过。
+                    var isARelevant = size <= RewriteOptions.WindowsAnalyzedFileMaxBytes;
+                    var pending = isARelevant ? smallPending : largePending;
 
-                    if (!NtfsNative.TryGetExtents(entry, out var extents, out var error))
+                    if (pending.Count >= probeCap)
                     {
-                        result.FilesUnreadable++;
-                        result.AddSkip("读取Runlist失败");
-                        Logger.Info($"分析跳过 {entry}: {error}");
-                        continue;
-                    }
+                        if (!pending.TryPeek(out _, out var smallest) || size <= smallest)
+                        {
+                            result.ScanTruncated = true;
+                            result.AddSkip("超出分析上限（按大小优先）");
+                            continue;
+                        }
 
-                    var layout = NtfsNative.BuildLayout(entry, size, extents);
-                    if (layout.TotalClusters <= 0)
-                    {
-                        result.AddSkip("空文件");
-                        continue;
+                        pending.Dequeue();
+                        result.AddSkip("超出分析上限（按大小优先）");
                     }
 
-                    result.Files.Add(layout);
-                    result.AnalyzedClusters += layout.TotalClusters;
-                    result.AnalyzedFragmentedClusters += layout.FragmentedClusters;
+                    pending.Enqueue(entry, size);
                 }
             }
             finally
             {
                 enumerator?.Dispose();
             }
+        }
+
+        // ---------------------------------------------------------- 探测阶段：/A 口径文件 + 大文件
+        var smallList = DrainDescending(smallPending);
+        var largeList = DrainDescending(largePending);
+        var largeTake = Math.Min(largeList.Count, probeCap * 2 / 5);
+        var smallTake = Math.Min(smallList.Count, probeCap - largeTake);
+        largeTake = Math.Min(largeList.Count, probeCap - smallTake);
+
+        archive.AddRange(smallList.Take(smallTake));
+        archive.AddRange(largeList.Take(largeTake));
+        archive.Sort((a, b) => b.Size.CompareTo(a.Size));
+
+        foreach (var (path, size) in archive)
+        {
+            if (guard?.StopRequested?.Invoke() == true)
+            {
+                result.ScanTruncated = true;
+                break;
+            }
+
+            if (DateTime.UtcNow > deadline)
+            {
+                result.ScanTruncated = true;
+                break;
+            }
+
+            guard?.Check();
+            result.FilesProbed++;
+
+            if (!NtfsNative.TryGetExtents(path, out var extents, out var error))
+            {
+                result.FilesUnreadable++;
+                result.AddSkip("读取Runlist失败");
+                Logger.Info($"分析跳过 {path}: {error}");
+                continue;
+            }
+
+            var layout = NtfsNative.BuildLayout(path, size, extents);
+            if (layout.TotalClusters <= 0)
+            {
+                result.AddSkip("空文件");
+                continue;
+            }
+
+            result.Files.Add(layout);
+            result.AnalyzedClusters += layout.TotalClusters;
+            result.AnalyzedFragmentedClusters += layout.FragmentedClusters;
         }
 
         if (result.ScanTruncated)
@@ -193,7 +250,8 @@ public static class VolumeAnalyzer
             $"{drive} 分析完成: 目录={result.CountedDirectories}, 跳过目录={result.SkippedDirectories}, 枚举失败={result.EnumerateFailures}, " +
             $"枚举={result.FilesScanned}, Runlist={result.FilesProbed}, " +
             $"读取失败={result.FilesUnreadable}, 已分析簇={result.AnalyzedClusters}, " +
-            $"覆盖率={coverage:0.##}%（碎片率仅代表已分析文件）, 文件级碎片率={result.FileFragmentationPercent:0.##}%");
+            $"覆盖率={coverage:0.##}%（碎片率仅代表已分析文件）, 文件级碎片率={result.FileFragmentationPercent:0.##}%" +
+            (options.RelaxedFilters ? "（补扫轮：已放宽最小文件/可回收门槛）" : string.Empty));
 
         if (volume is not null)
         {
@@ -208,6 +266,18 @@ public static class VolumeAnalyzer
         }
 
         return result;
+    }
+
+    /// <summary>把优先队列按文件大小从大到小取出。</summary>
+    private static List<(string Path, long Size)> DrainDescending(PriorityQueue<string, long> queue)
+    {
+        var list = new List<(string Path, long Size)>(queue.Count);
+        while (queue.TryDequeue(out var path, out var size))
+        {
+            list.Add((path, size));
+        }
+        list.Reverse();
+        return list;
     }
 
     /// <summary>只重读卷位图，用于整理后的空闲布局对比。</summary>
