@@ -9,13 +9,16 @@ namespace AutoDefrag;
 /// </summary>
 public sealed class AppConfig
 {
-    public int ConfigVersion { get; set; } = 9;
+    public int ConfigVersion { get; set; } = 10;
 
     /// <summary>CPU 守护阈值(%)：高于该值时挂起 defrag。</summary>
     public int CpuThreshold { get; set; } = 70;
 
-    /// <summary>每日执行时间 HH:mm；"0" / "00:00" 表示"当天首次启动时执行一次"。</summary>
-    public string DailyTime { get; set; } = "03:00";
+    /// <summary>
+    /// 每日整理时间；“0”表示不启用定时整理，回落到“每天开机后首次启动程序时整理一次”。
+    /// 新安装默认使用开机首次启动；旧配置里已经填过合法时间的保持原样。
+    /// </summary>
+    public string DailyTime { get; set; } = "0";
 
     /// <summary>开机自启（写入 HKCU Run 键）。</summary>
     public bool AutoStart { get; set; } = true;
@@ -135,7 +138,7 @@ public sealed class AppConfig
     public void Normalize()
     {
         if (CpuThreshold < 10 || CpuThreshold > 100) CpuThreshold = 70;
-        if (!DailyTimeRegex.IsMatch(DailyTime ?? string.Empty)) DailyTime = "03:00";
+        if (!DailyTimeRegex.IsMatch(DailyTime ?? string.Empty)) DailyTime = "0";
         if (NotificationTimeout < 10 || NotificationTimeout > 120) NotificationTimeout = 30;
         if (Theme is not ("System" or "Light" or "Dark")) Theme = "System";
         if (EngineMode is not ("Self" or "System" or "Auto")) EngineMode = "Auto";

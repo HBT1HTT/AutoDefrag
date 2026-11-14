@@ -317,11 +317,12 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0">
-                                <TextBlock Text="当天首次启动时执行一次" FontSize="13.5" />
-                                <TextBlock Text="今天还没整理的话，启动电脑后自动整理一次" Style="{StaticResource HintText}" />
+                                <TextBlock Text="启用定时整理" FontSize="13.5" />
+                                <TextBlock Text="关闭后不按时间整理，改为每天开机后首次启动程序时整理一次；时间框填 0 或留空也按关闭处理"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
                             </StackPanel>
                             <ToggleButton Grid.Column="1" Style="{StaticResource ToggleSwitch}"
-                                          IsChecked="{Binding RunAtStartup, Mode=TwoWay}"
+                                          IsChecked="{Binding ScheduledTimeEnabled, Mode=TwoWay}"
                                           VerticalAlignment="Center" />
                         </Grid>
 
@@ -332,7 +333,7 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0">
                                 <TextBlock Text="每天几点整理" FontSize="13.5" />
-                                <TextBlock Text="24 小时制，例如 03:00" Style="{StaticResource HintText}" />
+                                <TextBlock Text="24 小时制，例如 03:00；填 0 或留空表示不启用定时" Style="{StaticResource HintText}" TextWrapping="Wrap" />
                             </StackPanel>
                             <TextBox Grid.Column="1" Width="92"
                                      Style="{StaticResource FluentTextBox}"
@@ -346,6 +347,8 @@
 
                         <TextBlock Text="{Binding NextRunText, StringFormat='下次整理：{0}'}"
                                    Style="{StaticResource HintText}" Margin="0,4,0,0" />
+                        <TextBlock Text="{Binding ScheduleSummary}"
+                                   Style="{StaticResource HintText}" Margin="0,2,0,0" />
                     </StackPanel>
                 </Border>
 

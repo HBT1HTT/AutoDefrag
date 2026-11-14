@@ -131,9 +131,9 @@ internal static class ConfigMigrations
         note = null;
 
         var version = present.Contains("ConfigVersion") ? config.ConfigVersion : 5;
-        if (version > 8)
+        if (version > 10)
         {
-            note = $"配置 ConfigVersion={version} 高于当前支持的 8，无法识别的字段将被忽略";
+            note = $"配置 ConfigVersion={version} 高于当前支持的 10，无法识别的字段将被忽略";
             return false;
         }
 
@@ -211,6 +211,21 @@ internal static class ConfigMigrations
             config.ConfigVersion = 9;
             migrated = true;
             var extra = "配置已升级到 v9：新增「大簇卷允许系统整理」开关（默认关闭，原行为不变）";
+            note = note is null ? extra : note + "；" + extra;
+        }
+
+        if (config.ConfigVersion < 10)
+        {
+            // v10：定时整理改为可选。合法的历史时间原样保留（仍按定时执行）；
+            // 0 / 00:00 / 空 / 非法值统一记为 "0"，回落到“开机后首次启动时整理”。
+            var time = (config.DailyTime ?? string.Empty).Trim();
+            if (time.Length == 0 || time is "0" or "00:00" || !AppConfig.DailyTimeRegex.IsMatch(time))
+            {
+                config.DailyTime = "0";
+            }
+            config.ConfigVersion = 10;
+            migrated = true;
+            var extra = "配置已升级到 v10：定时整理改为可选，0/空表示不开定时，回落到开机首次启动";
             note = note is null ? extra : note + "；" + extra;
         }
 

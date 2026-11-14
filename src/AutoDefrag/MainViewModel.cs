@@ -114,7 +114,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _scheduleTimer.Start();
 
         var decision = GetDailyDecision();
-        Logger.Info($"开机自动整理判定: {decision} (DailyTime={_config.DailyTime}, ScheduleEnabled={_config.ScheduleEnabled})");
+        Logger.Info($"开机自动整理判定: {decision} (触发方式={AutoTriggerText}, DailyTime={_config.DailyTime}, ScheduleEnabled={_config.ScheduleEnabled})");
 
         if (decision == "done")
         {
@@ -123,7 +123,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         else if (decision == "run")
         {
             _triggeredDate = Today;
-            StartClean(auto: true);
+            Logger.Info($"自动整理触发方式：{AutoTriggerText}");
+            StartClean(auto: true, AutoTriggerText);
         }
 
         OnPropertyChanged(nameof(NextRunText));
@@ -137,8 +138,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (GetDailyDecision() != "run") return;
 
         _triggeredDate = Today;   // 先记下本会话今日已触发，避免 30s 反复重试
-        Logger.Info("每日自动整理已触发: DailyTime=" + _config.DailyTime);
-        StartClean(auto: true);
+        Logger.Info($"每日自动整理已触发：{AutoTriggerText}");
+        StartClean(auto: true, AutoTriggerText);
     }
 
     private string GetDailyDecision()
@@ -345,10 +346,32 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Logger.Info(value ? "每日自动整理已启用" : "每日自动整理已暂停");
             OnPropertyChanged();
             OnPropertyChanged(nameof(NextRunText));
+            OnPropertyChanged(nameof(ScheduleSummary));
         }
     }
 
     public void ToggleSchedule() => ScheduleEnabled = !ScheduleEnabled;
+
+    /// <summary>
+    /// 是否启用“每天定时整理”。关闭时回落到“每天开机后首次启动程序时整理一次”。
+    /// 与 RunAtStartup 是同一语义的两个方向，界面只暴露这一个开关，避免冗余。
+    /// </summary>
+    public bool ScheduledTimeEnabled
+    {
+        get => !_config.RunAtStartup;
+        set => RunAtStartup = !value;
+    }
+
+    /// <summary>设置界面用一句话说明当前触发方式。</summary>
+    public string ScheduleSummary =>
+        !_config.ScheduleEnabled
+            ? "当前触发方式：已暂停（每天自动整理关闭）"
+            : _config.RunAtStartup
+                ? "当前触发方式：每天开机后首次启动程序时整理一次"
+                : $"当前触发方式：每天 {_config.DailyTime} 定时整理";
+
+    private string AutoTriggerText =>
+        _config.RunAtStartup ? "开机后首次启动" : $"每天 {_config.DailyTime} 定时";
 
     public bool RunAtStartup
     {
@@ -370,14 +393,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _isTimeInvalid = false;
             _store.Save(_config);
             Logger.Info(value
-                ? "自动整理改为：当天首次启动时执行一次"
-                : $"自动整理改为：每天 {_config.DailyTime}");
+                ? "自动整理改为：不开定时，每天开机后首次启动程序时整理一次"
+                : $"自动整理改为：每天 {_config.DailyTime} 定时整理");
 
             OnPropertyChanged();
             OnPropertyChanged(nameof(TimeText));
             OnPropertyChanged(nameof(TimeRowVisibility));
             OnPropertyChanged(nameof(TimeErrorVisibility));
             OnPropertyChanged(nameof(NextRunText));
+            OnPropertyChanged(nameof(ScheduledTimeEnabled));
+            OnPropertyChanged(nameof(ScheduleSummary));
         }
     }
 
@@ -391,11 +416,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public Visibility TimeErrorVisibility =>
         _isTimeInvalid ? Visibility.Visible : Visibility.Collapsed;
 
-    /// <summary>由时间输入框在失焦/回车时调用；非法格式返回 false 并显示提示。</summary>
+    /// <summary>
+    /// 由时间输入框在失焦/回车时调用；非法格式返回 false 并显示提示。
+    /// 空或 0 表示关闭定时整理，回落到开机首次启动，不算错误。
+    /// </summary>
     public bool TrySetTime(string text)
     {
         var value = (text ?? string.Empty).Trim();
-        if (!ClockRegex.IsMatch(value))
+        if (value.Length == 0 || value is "0" or "00:00")
+        {
+            value = "0";
+        }
+        else if (!ClockRegex.IsMatch(value))
         {
             _isTimeInvalid = true;
             OnPropertyChanged(nameof(IsTimeInvalid));
@@ -405,14 +437,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         _isTimeInvalid = false;
         _config.DailyTime = value;
-        _lastClock = value;
+        if (value != "0") _lastClock = value;
         _store.Save(_config);
-        Logger.Info("每日执行时间已改为 " + value);
+        Logger.Info(value == "0" ? "定时整理已关闭，改为开机后首次启动时整理" : "每日执行时间已改为 " + value);
 
         OnPropertyChanged(nameof(IsTimeInvalid));
         OnPropertyChanged(nameof(TimeErrorVisibility));
         OnPropertyChanged(nameof(TimeText));
         OnPropertyChanged(nameof(RunAtStartup));
+        OnPropertyChanged(nameof(ScheduledTimeEnabled));
+        OnPropertyChanged(nameof(ScheduleSummary));
         OnPropertyChanged(nameof(NextRunText));
         return true;
     }
@@ -493,7 +527,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         get
         {
             if (!_config.ScheduleEnabled) return "自动整理已暂停";
-            if (_config.RunAtStartup) return "当天首次启动时";
+            if (_config.RunAtStartup) return "每天开机后首次启动程序时";
             if (LastRunIsToday()) return $"明天 {_config.DailyTime}";
 
             return DateTime.Now < TargetTimeToday()
@@ -785,7 +819,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void StartCleanManual() => StartClean(auto: false);
 
-    private void StartClean(bool auto)
+    private void StartClean(bool auto, string? trigger = null)
     {
         string? gateBusy = null;
         if (_worker.IsRunning || _previewing || TaskGate.IsBusy(out gateBusy))
@@ -826,8 +860,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var qualityName = DefragQualityPresets.Match(prefs)?.Name
                           ?? (prefs.Quality == DefragQualityPresets.Custom ? "自定义" : DefragQualityPresets.Get(prefs.Quality).Name);
         IsBusy = true;
-        StatusText = auto ? "自动整理中" : "正在整理";
+        StatusText = auto ? $"自动整理中（{trigger ?? AutoTriggerText}）" : "正在整理";
         FooterHint = $"正在整理 {string.Join("、", drives)}（{EngineModeText}，质量={qualityName}）· " +
+                     (string.IsNullOrEmpty(trigger) ? string.Empty : $"触发方式：{trigger} · ") +
                      (_config.FragThresholdEnabled ? $"仅整理碎片率 ≥ {_config.FragThresholdPercent}% 的文件 · " : "全部整理 · ") +
                      $"预计最多 {prefs.MaxRounds} 轮 · CPU 连续 10 秒高于 {_config.CpuThreshold}% 时暂停，回落后自动继续";
         BeginProgress($"正在准备整理 {string.Join("、", drives)}");

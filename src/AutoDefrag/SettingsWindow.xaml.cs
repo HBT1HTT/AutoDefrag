@@ -18,7 +18,7 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
     private readonly MainViewModel _vm;
 
     private bool _scheduleEnabled;
-    private bool _runAtStartup;
+    private bool _scheduledTimeEnabled;
     private bool _autoStart;
     private bool _minimizeToTray;
     private bool _completionSound;
@@ -47,7 +47,7 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         _vm = viewModel;
 
         _scheduleEnabled = _vm.ScheduleEnabled;
-        _runAtStartup = _vm.RunAtStartup;
+        _scheduledTimeEnabled = !_vm.RunAtStartup;
         _timeText = _vm.TimeText;
         _autoStart = _vm.AutoStart;
         _minimizeToTray = _vm.MinimizeToTray;
@@ -170,18 +170,19 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         set => SetField(ref _scheduleEnabled, value);
     }
 
-    public bool RunAtStartup
+    /// <summary>是否启用每天定时整理；关闭时回落到开机后首次启动整理。</summary>
+    public bool ScheduledTimeEnabled
     {
-        get => _runAtStartup;
+        get => _scheduledTimeEnabled;
         set
         {
-            if (!SetField(ref _runAtStartup, value)) return;
+            if (!SetField(ref _scheduledTimeEnabled, value)) return;
             OnPropertyChanged(nameof(TimeRowVisibility));
         }
     }
 
     public Visibility TimeRowVisibility =>
-        _runAtStartup ? Visibility.Collapsed : Visibility.Visible;
+        _scheduledTimeEnabled ? Visibility.Visible : Visibility.Collapsed;
 
     public string TimeText
     {
@@ -451,10 +452,17 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
 
     private void Save_Click(object sender, RoutedEventArgs e)
     {
-        if (!_runAtStartup)
+        var time = (_timeText ?? string.Empty).Trim();
+        if (_scheduledTimeEnabled)
         {
-            var time = (_timeText ?? string.Empty).Trim();
-            if (!ClockRegex.IsMatch(time))
+            // 0 / 00:00 / 留空都表示“不启用定时整理”，按关闭处理而不是报错
+            if (time.Length == 0 || time is "0" or "00:00")
+            {
+                _scheduledTimeEnabled = false;
+                OnPropertyChanged(nameof(ScheduledTimeEnabled));
+                OnPropertyChanged(nameof(TimeRowVisibility));
+            }
+            else if (!ClockRegex.IsMatch(time))
             {
                 SetTimeInvalid(true);
                 return;
@@ -499,16 +507,16 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
             defrag = BuildPreferences();
         }
 
-        // 调度：先处理“启动后立即执行”，再写入具体时间，两种切换都不会丢用户输入。
+        // 调度：不启用定时就回落到“开机后首次启动时整理”；启用时再写入具体时间。
         _vm.ScheduleEnabled = _scheduleEnabled;
-        if (_runAtStartup)
+        if (!_scheduledTimeEnabled)
         {
             _vm.RunAtStartup = true;
         }
         else
         {
             if (_vm.RunAtStartup) _vm.RunAtStartup = false;
-            _vm.TrySetTime((_timeText ?? string.Empty).Trim());
+            _vm.TrySetTime(time);
         }
 
         _vm.CpuThreshold = _cpuThreshold;
