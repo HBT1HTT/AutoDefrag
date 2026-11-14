@@ -580,11 +580,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string EngineModeHint => _config.EngineMode switch
     {
         EngineResolver.System =>
-            "调用 Windows 自带的 defrag.exe，和 1.2.0 相同；对每块大于 4KB 的磁盘无效，会提示跳过而不是假装成功。",
+            "调用 Windows 自带的 defrag.exe。大簇卷（每块大于 4KB）默认跳过；可在整理设置里开启「允许大簇卷使用系统整理」手动覆盖。",
         EngineResolver.Auto =>
-            "推荐。按每块盘的存储块大小自动选：大于 4KB 用本程序整理，不超过 4KB 用 Windows 自带整理。已有用户保存过的选择不会被改动。",
+            "推荐。按每块盘的存储块大小自动选：大于 4KB 用本程序整理，不超过 4KB 用 Windows 自带整理；开启大簇覆盖后，大簇卷也改走系统整理。",
         _ =>
-            "大容量存储块磁盘（每块大于 4KB）由本程序重写文件来整理；小存储块磁盘仍调用系统 defrag，效果更稳。重写会完整读写一遍文件，耗时约等于复制。"
+            "大容量存储块磁盘（每块大于 4KB）由本程序重写文件来整理；小存储块磁盘仍调用系统 defrag。选择本方式时，「允许大簇卷使用系统整理」不会改变它。"
     };
 
     /// <summary>只整理碎片较多的文件（关闭时全部整理）。</summary>
@@ -636,7 +636,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     $"单轮≤{_config.MaxFilesPerRun}文件/{_config.MaxBytesPerRunGB}GB, 可回收≥{_config.MinReclaimMB}MB, " +
                     $"校验={_config.VerifyMode}, 最多{_config.MaxRounds}轮/{_config.MaxRunMinutes}分钟, " +
                     $"碎片率阈值={(FragThresholdEnabled ? $"≥{FragThresholdPercent}%" : "关闭")}, " +
-                    $"固态只优化={(_config.SsdOptimizeOnly ? "是" : "否")}, 机械盘空闲合并={(_config.MergeFreeSpace ? "是" : "否")}");
+                    $"固态只优化={(_config.SsdOptimizeOnly ? "是" : "否")}, 机械盘空闲合并={(_config.MergeFreeSpace ? "是" : "否")}, " +
+                    $"大簇允许系统整理={(_config.AllowLargeClusterSystem ? "是（手动覆盖）" : "否")}");
         OnPropertyChanged(nameof(FragThresholdEnabled));
         OnPropertyChanged(nameof(FragThresholdPercent));
         OnPropertyChanged(nameof(FragThresholdText));

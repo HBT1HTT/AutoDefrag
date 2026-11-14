@@ -162,6 +162,16 @@ public static class DefragPolicy
     /// <summary>簇大于 4KB 时，忽略系统 /A 的“无需整理”结论。</summary>
     public static bool IgnoresSystemNoAction(int clusterBytes) => clusterBytes > SystemDefragClusterLimit;
 
+    /// <summary>
+    /// 用户手动开启“大簇卷允许系统整理”后，是否应改走系统 defrag。
+    /// 只对“Windows 自带”和“自动”生效；明确选择“本程序整理”时仍走文件级重写，
+    /// 避免覆盖开关与整理方式形成两套互相矛盾的语义。
+    /// </summary>
+    public static bool UseSystemOnLargeCluster(string? engineMode, int clusterBytes, bool allow)
+        => allow && clusterBytes > SystemDefragClusterLimit &&
+           (string.Equals(engineMode, "System", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(engineMode, "Auto", StringComparison.OrdinalIgnoreCase));
+
     /// <summary>系统 /A 是否明确表示“无需整理”（碎片率 0 或输出含对应措辞）。</summary>
     public static bool SystemReportsNoAction(ExternalFragResult? result)
     {

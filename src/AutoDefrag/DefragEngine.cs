@@ -122,21 +122,38 @@ public static class DefragEngine
             // 每块盘本轮实际采用的方式与判断依据（Auto 按存储块大小收敛）
             var effective = EngineResolver.Effective(engineMode, clusterBytes);
             var decision = EngineResolver.Describe(engineMode, clusterBytes);
+            var manualLargeOverride = DefragPolicy.UseSystemOnLargeCluster(
+                engineMode, clusterBytes, prefs.AllowLargeClusterSystem);
+            if (manualLargeOverride)
+            {
+                effective = "System";
+                decision = "手动覆盖 → Windows 自带整理（大簇卷允许系统整理）";
+                Logger.Warn($"{drive} 簇 {clusterBytes} 字节 > {DefragPolicy.SystemDefragClusterLimit}：" +
+                            "用户在设置中开启「大簇卷允许系统整理」，本次改走系统 defrag；这是手动覆盖，不是程序自动判断");
+                ProgressLog.Append($"{drive} 手动覆盖：大簇卷改用 Windows 自带整理（设置中已开启）");
+            }
+            else if (prefs.AllowLargeClusterSystem && DiskService.IsLargeCluster(clusterBytes) &&
+                     string.Equals(engineMode, "Self", StringComparison.OrdinalIgnoreCase))
+            {
+                Logger.Info($"{drive} 已开启「大簇卷允许系统整理」，但整理方式为「本程序整理」：" +
+                            "覆盖开关不改变显式选择，仍走文件级重写");
+            }
+
             state.Engine = EngineResolver.ShortName(effective);
             state.EngineDetail = decision;
             Logger.Info($"{drive} 整理方式决策: {decision}（配置={modeText}，存储块={DiskService.ClusterText(clusterBytes)}）");
             ProgressLog.Append($"{drive} 整理方式: {decision}");
 
-            // 大簇卷：系统 defrag 无法真正整理，按实际采用的整理方式分流
-            if (DiskService.IsLargeCluster(clusterBytes))
+            // 大簇卷默认不走系统整理；只有用户开启覆盖时才落入下面的系统路径
+            if (DiskService.IsLargeCluster(clusterBytes) && !(manualLargeOverride && effective == "System"))
             {
                 if (effective == "System")
                 {
-                    Logger.Warn($"{drive} 的存储块为 {DiskService.ClusterText(clusterBytes)}（大于 4KB）：Windows 自带整理对该磁盘无效，" +
-                                "本次跳过并不报成功");
-                    ProgressLog.Append($"{drive} 跳过：{decision}");
-                    results.Add(new DriveRunResult(drive, media, "系统方式对大容量存储块磁盘无效", null, 0, 0,
-                        DateTime.Now, DateTime.Now, "系统方式无效（该磁盘）", null, null, clusterBytes));
+                    Logger.Warn($"{drive} 的存储块为 {DiskService.ClusterText(clusterBytes)}（大于 4KB）：" +
+                                "按当前设置跳过系统整理（可在设置中开启「大簇卷允许系统整理」手动覆盖），本次不报成功");
+                    ProgressLog.Append($"{drive} 跳过：{decision}（可在设置中允许大簇卷系统整理）");
+                    results.Add(new DriveRunResult(drive, media, "系统整理在大簇卷上默认跳过", null, 0, 0,
+                        DateTime.Now, DateTime.Now, "按设置跳过（大簇卷）", null, null, clusterBytes));
                     continue;
                 }
 
@@ -169,7 +186,7 @@ public static class DefragEngine
                 }
                 else if (prefs.SsdOptimizeOnly && media == DiskMediaKind.Unknown)
                 {
-                    Logger.Warn($"{drive} 介质类型无法识别：保守起见仍按文件级重写处理（系统 /O 对该簇大小可能无效）");
+                    Logger.Warn($"{drive} 介质类型无法识别：保守起见仍按文件级重写处理（系统 /O 在该簇大小上行为不确定）");
                 }
 
                 Logger.Info($"{drive} 的存储块为 {DiskService.ClusterText(clusterBytes)}（大于 4KB）：不使用系统 defrag，改走文件级重写整理");
@@ -218,7 +235,7 @@ public static class DefragEngine
 
             var plan = BuildPlan(drive, media, preFrag, volumeBytes, freeBytes, clusterBytes, mergeGate);
             Logger.Info($"计划 {drive}: 类型={DiskService.MediaText(media)} 存储块={DiskService.ClusterText(clusterBytes)} " +
-                        $"整理方式={decision}（小存储块仍用系统 defrag） 命令={plan.CommandLine} 原因={plan.Reason}");
+                        $"整理方式={decision} 命令={plan.CommandLine} 原因={plan.Reason}");
             ProgressLog.Append($"{drive} 计划: {plan.CommandLine}；{decision}");
 
             state.TotalBytes = 0;
@@ -279,14 +296,15 @@ public static class DefragEngine
                 run.StartTime, run.EndTime,
                 postProbe.Stopped ? "已停止" : run.Status, preFrag, postProbe.FragPercent, clusterBytes,
                 MergeStatus: mergeStatus, MergeDetail: mergeDetail,
-                WinFragBefore: preFrag, WinFragAfter: postProbe.FragPercent));
+                WinFragBefore: preFrag, WinFragAfter: postProbe.FragPercent,
+                ManualLargeClusterOverride: manualLargeOverride));
         }
 
         var okCount = results.Count(r => r.Status == "成功");
         var total = results.Count;
         var summary = string.Join("; ", results.Select(r =>
             $"{r.Drive}[{DiskService.MediaText(r.Media)} 存储块={DiskService.ClusterText(r.ClusterBytes)} {r.Arguments} " +
-            $"方式={EngineResolver.Describe(engineMode, r.ClusterBytes)}] " +
+            $"方式={(r.ManualLargeClusterOverride ? "手动覆盖 → Windows 自带整理（大簇卷）" : EngineResolver.Describe(engineMode, r.ClusterBytes))}] " +
             $"状态={r.Status},exit={r.ExitCode?.ToString() ?? "--"},暂停={r.Suspended},继续={r.Resumed}," +
             $"碎片{FormatFrag(r.PreFrag)}->{FormatFrag(r.PostFrag)}" +
             (r.CoveragePercent is null ? string.Empty : $",覆盖率={r.CoveragePercent:0.#}%（仅已分析文件）") +
@@ -294,6 +312,7 @@ public static class DefragEngine
             (r.WinFragBefore is null && r.WinFragAfter is null ? string.Empty :
                 $",Windows/A={FormatFrag(r.WinFragBefore)}->{FormatFrag(r.WinFragAfter)}") +
             (r.MergeStatus is "未启用" or "" ? string.Empty : $",空闲合并={r.MergeStatus}") +
+            (r.ManualLargeClusterOverride ? ",手动覆盖=大簇卷系统整理（用户开启，非程序判断）" : string.Empty) +
             (string.IsNullOrEmpty(r.ErrorCode) ? string.Empty : $",错误码={r.ErrorCode}")));
 
         Logger.Info($"全部完成: 成功={okCount}/{total}  累计暂停={results.Sum(r => r.Suspended)}次 继续={results.Sum(r => r.Resumed)}次   明细: {summary}");
@@ -472,7 +491,7 @@ public static class DefragEngine
     {
         var largeCluster = DiskService.IsLargeCluster(clusterBytes);
         var prefix = largeCluster
-            ? $"【可能不支持：存储块 {DiskService.ClusterText(clusterBytes)} 大于 4KB】"
+            ? $"【大簇卷：存储块 {DiskService.ClusterText(clusterBytes)} 大于 4KB，系统整理默认跳过，可在设置中手动允许】"
             : string.Empty;
 
         if (media == DiskMediaKind.Hdd)
@@ -760,7 +779,7 @@ public static class DefragEngine
         {
             "成功" => "成功",
             "已停止" => "已停止",
-            "可能不支持" => "可能不支持",
+            "可能不支持" => "未确认",
             "无法确认" => "无法确认",
             _ => "失败"
         };
@@ -770,8 +789,8 @@ public static class DefragEngine
             "成功" => "空闲空间合并完成",
             "失败" => $"空闲空间合并失败（exit={FormatExit(run.ExitCode)}, 错误码={run.ErrorCode ?? "无"}）",
             "已停止" => "空闲空间合并被用户停止",
-            "可能不支持" => "系统未报告实际搬移证据，可能不支持该卷的 /X；本次结果不按成功计",
-            _ => "系统报告成功但没有可确认的搬移证据"
+            "未确认" => "系统未报告实际搬移证据；在大簇卷上 /X 可能仍然有效，请用 /A 前后对比确认",
+            _ => "系统报告成功但没有可确认的搬移证据，结果记为未确认"
         };
 
         Logger.Info($"{drive} 合并空闲空间结束: 状态={status}, exit={FormatExit(run.ExitCode)}, 错误码={run.ErrorCode ?? "无"}, " +
@@ -1009,8 +1028,20 @@ public static class DefragEngine
 
         var hasEvidence = HasOperationEvidence(output, elapsed);
 
-        // 超大簇卷：看不到实际整理过程时，如实标为“可能不支持”，不报成功
-        if (!hasEvidence && DiskService.IsLargeCluster(plan.ClusterBytes)) return "可能不支持";
+        // 大簇卷：系统整理的行为随卷/版本差异很大，用户实测 64KB 卷上系统整理可把 /A 从 19% 降到 2%。
+        // 因此不再把“没有进度输出”直接判为不支持：退出码为 0 且耗时正常时按成功记录，并提示用 /A 复核。
+        if (!hasEvidence && DiskService.IsLargeCluster(plan.ClusterBytes))
+        {
+            if (elapsed.TotalSeconds < 2)
+            {
+                Logger.Warn($"{plan.Drive} 系统整理结束过快（{elapsed.TotalSeconds:0.#}s）且无输出，结果按“无法确认”处理");
+                return "无法确认";
+            }
+
+            Logger.Info($"{plan.Drive} 大簇卷系统整理未报告进度明细（exit=0，用时 {elapsed.TotalSeconds:0}s）：" +
+                        "按成功记录；大簇卷上系统整理可能有效，建议用 /A 前后对比确认");
+            return "成功";
+        }
 
         // 机械硬盘读不到碎片情况、且看不到实际整理过程 -> 无法确认
         if (!hasEvidence && plan.Media == DiskMediaKind.Hdd && preFrag is null) return "无法确认";
@@ -1328,4 +1359,5 @@ public sealed record DriveRunResult(
     string MergeDetail = "",
     double? WinFragBefore = null,
     double? WinFragAfter = null,
-    string WinFragNote = "");
+    string WinFragNote = "",
+    bool ManualLargeClusterOverride = false);

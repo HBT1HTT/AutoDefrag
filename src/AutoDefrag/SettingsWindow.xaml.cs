@@ -38,6 +38,7 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
     private string _quality = DefragQualityPresets.Balanced;
     private bool _ssdOptimizeOnly = true;
     private bool _mergeFreeSpace = true;
+    private bool _allowLargeClusterSystem;
     private bool _applyingPreset;
 
     public SettingsWindow(MainViewModel viewModel)
@@ -66,6 +67,7 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
                        : DefragQualityPresets.Nearest(prefs).Key);
         _ssdOptimizeOnly = prefs.SsdOptimizeOnly;
         _mergeFreeSpace = prefs.MergeFreeSpace;
+        _allowLargeClusterSystem = prefs.AllowLargeClusterSystem;
 
         DataContext = this;
 
@@ -261,6 +263,16 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         set => SetField(ref _mergeFreeSpace, value);
     }
 
+    /// <summary>
+    /// 手动覆盖大簇限制：允许簇 &gt; 4KB 的卷使用 Windows 自带 defrag。
+    /// 仅在整理方式为“Windows 自带/自动”时生效；默认关闭。
+    /// </summary>
+    public bool AllowLargeClusterSystem
+    {
+        get => _allowLargeClusterSystem;
+        set => SetField(ref _allowLargeClusterSystem, value);
+    }
+
     public bool FragThresholdEnabled
     {
         get => _fragThresholdEnabled;
@@ -369,7 +381,8 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
             preset.MaxRounds,
             preset.MaxRunMinutes,
             _ssdOptimizeOnly,
-            _mergeFreeSpace).Normalized();
+            _mergeFreeSpace,
+            _allowLargeClusterSystem).Normalized();
     }
 
     // ------------------------------------------------------- 阈值输入框过滤
@@ -457,7 +470,8 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
             defrag = _vm.DefragPreferences with
             {
                 SsdOptimizeOnly = _ssdOptimizeOnly,
-                MergeFreeSpace = _mergeFreeSpace
+                MergeFreeSpace = _mergeFreeSpace,
+                AllowLargeClusterSystem = _allowLargeClusterSystem
             };
         }
         else

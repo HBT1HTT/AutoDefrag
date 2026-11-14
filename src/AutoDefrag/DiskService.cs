@@ -88,7 +88,7 @@ public static class DiskService
         return $"{clusterBytes}B";
     }
 
-    /// <summary>Windows 内置 defrag 疑似不支持的超大簇（&gt;4KB）卷。</summary>
+    /// <summary>大簇（&gt;4KB）卷：Windows 内置 defrag 默认不作为主要整理途径，但并非绝对无效，可在设置中手动允许。</summary>
     public static bool IsLargeCluster(int clusterBytes) => clusterBytes > 4096;
 
     /// <summary>识别介质：寻道惩罚为 true=HDD，false=SSD，查询失败=Unknown。</summary>

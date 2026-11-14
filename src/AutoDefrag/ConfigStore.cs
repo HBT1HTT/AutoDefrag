@@ -204,6 +204,16 @@ internal static class ConfigMigrations
             note = note is null ? extra : note + "；" + extra;
         }
 
+        if (config.ConfigVersion < 9)
+        {
+            // v9：新增“允许大簇卷使用系统整理”的手动覆盖；旧配置一律按关闭处理，行为不变。
+            if (!present.Contains("AllowLargeClusterSystem")) config.AllowLargeClusterSystem = false;
+            config.ConfigVersion = 9;
+            migrated = true;
+            var extra = "配置已升级到 v9：新增「大簇卷允许系统整理」开关（默认关闭，原行为不变）";
+            note = note is null ? extra : note + "；" + extra;
+        }
+
         return migrated;
     }
 }

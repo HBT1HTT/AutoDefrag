@@ -9,7 +9,7 @@ namespace AutoDefrag;
 /// </summary>
 public sealed class AppConfig
 {
-    public int ConfigVersion { get; set; } = 8;
+    public int ConfigVersion { get; set; } = 9;
 
     /// <summary>CPU 守护阈值(%)：高于该值时挂起 defrag。</summary>
     public int CpuThreshold { get; set; } = 70;
@@ -110,6 +110,12 @@ public sealed class AppConfig
     public bool MergeFreeSpace { get; set; } = true;
 
     /// <summary>
+    /// 手动覆盖“大簇卷不走系统整理”的限制：簇大小大于 4KB 时也允许使用 Windows 自带 defrag。
+    /// 默认关闭；只有整理方式为“Windows 自带”或“自动”时才生效，选择“本程序整理”时不影响其文件级重写。
+    /// </summary>
+    public bool AllowLargeClusterSystem { get; set; }
+
+    /// <summary>
     /// 整理任务真正完成时播放一段约 1 秒的提示音（失败、被停止时不播放）。
     /// 默认开启；旧配置没有该字段时按开启处理。
     /// </summary>
@@ -161,7 +167,7 @@ public sealed class AppConfig
     public DefragPreferences GetDefragPreferences() => new(
         DefragQuality,
         MinFileSizeKB, MaxFilesPerRun, MaxBytesPerRunGB, MinReclaimMB,
-        VerifyMode, MaxRounds, MaxRunMinutes, SsdOptimizeOnly, MergeFreeSpace);
+        VerifyMode, MaxRounds, MaxRunMinutes, SsdOptimizeOnly, MergeFreeSpace, AllowLargeClusterSystem);
 
     /// <summary>
     /// 写回整理偏好：先规范化（非法值回落默认），再同步到字段。
@@ -180,6 +186,7 @@ public sealed class AppConfig
         MaxRunMinutes = p.MaxRunMinutes;
         SsdOptimizeOnly = p.SsdOptimizeOnly;
         MergeFreeSpace = p.MergeFreeSpace;
+        AllowLargeClusterSystem = p.AllowLargeClusterSystem;
         Normalize();
     }
 }
@@ -195,7 +202,8 @@ public sealed record DefragPreferences(
     int MaxRounds,
     int MaxRunMinutes,
     bool SsdOptimizeOnly,
-    bool MergeFreeSpace = true)
+    bool MergeFreeSpace = true,
+    bool AllowLargeClusterSystem = false)
 {
     public static DefragPreferences Default => DefragQualityPresets.Get(DefragQualityPresets.Balanced).ToPreferences();
 
@@ -230,7 +238,8 @@ public sealed record DefragQualityPreset(
 
     public DefragPreferences ToPreferences() => new(
         Key, MinFileSizeKB, MaxFilesPerRun, MaxBytesPerRunGB, MinReclaimMB,
-        VerifyMode, MaxRounds, MaxRunMinutes, SsdOptimizeOnly: true, MergeFreeSpace: true);
+        VerifyMode, MaxRounds, MaxRunMinutes, SsdOptimizeOnly: true, MergeFreeSpace: true,
+        AllowLargeClusterSystem: false);
 }
 
 /// <summary>

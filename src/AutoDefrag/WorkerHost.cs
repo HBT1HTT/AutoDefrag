@@ -85,7 +85,8 @@ public static class WorkerHost
                 GetInt(args, "--rounds", 4),
                 GetInt(args, "--maxminutes", 180),
                 (GetValue(args, "--ssdopt") ?? "1") != "0",
-                (GetValue(args, "--mergefree") ?? "1") != "0").Normalized();
+                (GetValue(args, "--mergefree") ?? "1") != "0",
+                (GetValue(args, "--allowsystemlarge") ?? "0") == "1").Normalized();
 
             var qualityName = DefragQualityPresets.Match(prefs)?.Name
                               ?? (prefs.Quality == DefragQualityPresets.Custom ? "自定义" : DefragQualityPresets.Get(prefs.Quality).Name);
@@ -93,7 +94,7 @@ public static class WorkerHost
                 ? $", CPU上限={threshold}%, 整理方式={EngineResolver.ModeText(engine)}, 文件碎片率={(minFrag > 0 ? $"≥{minFrag}%" : "不限")}" +
                   $", 质量={qualityName}, 最小文件={prefs.MinFileSizeKB}KB, 单轮≤{prefs.MaxFilesPerRun}文件/{prefs.MaxBytesPerRunGB}GB" +
                   $", 可回收≥{prefs.MinReclaimMB}MB, 校验={prefs.VerifyMode}, 最多{prefs.MaxRounds}轮, 固态只优化={(prefs.SsdOptimizeOnly ? "是" : "否")}" +
-                  $", 机械盘合并空闲={(prefs.MergeFreeSpace ? "是" : "否")}"
+                  $", 机械盘合并空闲={(prefs.MergeFreeSpace ? "是" : "否")}, 大簇允许系统整理={(prefs.AllowLargeClusterSystem ? "是（手动覆盖）" : "否")}"
                 : ", CPU上限=(检查磁盘时不需要)";
             Logger.Info($"后台任务启动: 模式={modeName}({mode}), 磁盘={(drives.Length == 0 ? "(自动)" : string.Join(",", drives))}{thresholdLog}");
 

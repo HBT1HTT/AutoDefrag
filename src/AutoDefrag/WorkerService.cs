@@ -178,6 +178,8 @@ public sealed class WorkerService
             arguments.Add(p.SsdOptimizeOnly ? "1" : "0");
             arguments.Add("--mergefree");
             arguments.Add(p.MergeFreeSpace ? "1" : "0");
+            arguments.Add("--allowsystemlarge");
+            arguments.Add(p.AllowLargeClusterSystem ? "1" : "0");
         }
         else
         {

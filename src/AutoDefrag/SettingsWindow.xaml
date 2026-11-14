@@ -274,6 +274,21 @@
                                           IsChecked="{Binding MergeFreeSpace, Mode=TwoWay}"
                                           VerticalAlignment="Center" />
                         </Grid>
+
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="允许大簇卷使用系统整理" FontSize="13.5" />
+                                <TextBlock Text="手动覆盖“簇大于 4KB 不走系统整理”的限制，让 64KB 等大簇卷也能用 Windows 自带 defrag。仅在整理方式为“Windows 自带”或“自动”时生效；选“本程序整理”时不起作用。默认关闭"
+                                           Style="{StaticResource HintText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ToggleButton x:Name="AllowLargeClusterSystemToggle" Grid.Column="1" Style="{StaticResource ToggleSwitch}"
+                                          IsChecked="{Binding AllowLargeClusterSystem, Mode=TwoWay}"
+                                          VerticalAlignment="Center" />
+                        </Grid>
                     </StackPanel>
                 </Border>
 
