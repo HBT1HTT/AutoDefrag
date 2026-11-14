@@ -21,64 +21,15 @@
 
         <StackPanel Grid.Row="0">
             <TextBlock Text="设置" Style="{StaticResource WindowTitle}" FontSize="24" />
-            <TextBlock Text="外观、自动整理与运行选项" Style="{StaticResource WindowSubtitle}" />
+            <TextBlock Text="整理方式、自动整理与运行选项" Style="{StaticResource WindowSubtitle}" />
         </StackPanel>
 
         <ScrollViewer Grid.Row="1" Margin="0,14,0,12" VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled">
             <StackPanel>
 
-                <!-- ================= 外观 ================= -->
-                <Border Style="{StaticResource Card}" Padding="18,16">
-                    <StackPanel>
-                        <TextBlock Text="外观" Style="{StaticResource CardTitle}" Margin="0,0,0,12" />
-
-                        <Grid Margin="0,0,0,12">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0">
-                                <TextBlock Text="界面字体" FontSize="13.5" />
-                                <TextBlock Text="选择本机已安装的字体" Style="{StaticResource HintText}" />
-                            </StackPanel>
-                            <ComboBox Grid.Column="1" Width="240"
-                                      Style="{StaticResource FluentComboBox}"
-                                      ItemsSource="{Binding FontNames}"
-                                      SelectedItem="{Binding SelectedFont, Mode=TwoWay}"
-                                      VerticalAlignment="Center" />
-                        </Grid>
-
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0">
-                                <TextBlock Text="界面主题" FontSize="13.5" />
-                                <TextBlock Text="浅色、深色或跟随系统" Style="{StaticResource HintText}" />
-                            </StackPanel>
-                            <Border Grid.Column="1" Background="{DynamicResource ControlBackground}"
-                                    BorderBrush="{DynamicResource ControlBorder}" BorderThickness="1"
-                                    CornerRadius="8" Padding="2" VerticalAlignment="Center">
-                                <StackPanel Orientation="Horizontal">
-                                    <RadioButton x:Name="ThemeSystem" Content="跟随系统"
-                                                 Style="{StaticResource SegmentRadio}"
-                                                 Tag="System" Checked="Theme_Checked" />
-                                    <RadioButton x:Name="ThemeLight" Content="浅色"
-                                                 Style="{StaticResource SegmentRadio}"
-                                                 Tag="Light" Checked="Theme_Checked" />
-                                    <RadioButton x:Name="ThemeDark" Content="深色"
-                                                 Style="{StaticResource SegmentRadio}"
-                                                 Tag="Dark" Checked="Theme_Checked" />
-                                </StackPanel>
-                            </Border>
-                        </Grid>
-                    </StackPanel>
-                </Border>
-
                 <!-- ================= 整理方式 ================= -->
-                <Border Style="{StaticResource Card}" Padding="18,20,18,20" Margin="0,10,0,0">
+                <Border Style="{StaticResource Card}" Padding="18,20,18,20">
                     <StackPanel>
                         <TextBlock Text="整理方式" Style="{StaticResource CardTitle}" Margin="0,0,0,14" />
 

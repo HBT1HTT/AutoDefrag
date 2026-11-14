@@ -3,6 +3,7 @@ using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
+using Microsoft.Win32;
 using Drawing = System.Drawing;
 using WinForms = System.Windows.Forms;
 
@@ -87,12 +88,14 @@ public partial class App : System.Windows.Application
             $"配置已载入: {AppPaths.ConfigFile} " +
             $"(DailyTime={config.DailyTime}, AutoStart={config.AutoStart}, " +
             $"CpuThreshold={config.CpuThreshold}, ScheduleEnabled={config.ScheduleEnabled}, " +
-            $"SelectedDrives={(config.SelectedDrives is null ? "(首次运行: 默认全部)" : string.Join(",", config.SelectedDrives))}, " +
-            $"UiFont={(string.IsNullOrWhiteSpace(config.UiFont) ? "(推荐默认)" : config.UiFont)})");
+            $"SelectedDrives={(config.SelectedDrives is null ? "(首次运行: 默认全部)" : string.Join(",", config.SelectedDrives))})");
 
         AutoStartService.Sync(config.AutoStart);
-        ThemeService.Apply(config.Theme);
-        FontService.Apply(config.UiFont);
+        // 界面外观固定：圆润系统字体 + 跟随 Windows 应用主题（浅色/深色两套都已实现）。
+        // 旧配置里的 UiFont / Theme 字段保留兼容，但不再读取，统一按默认处理。
+        ThemeService.Apply("System");
+        FontService.Apply(string.Empty);
+        SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
 
         _vm = new MainViewModel(config, _store);
         _vm.NotificationRequested += ShowNotification;
@@ -361,6 +364,20 @@ public partial class App : System.Windows.Application
         }
     }
 
+    // ------------------------------------------------------------------ 跟随系统主题
+
+    /// <summary>
+    /// Windows 应用主题切换时重新读取系统设置。ThemeService 同时支持浅色/深色，
+    /// 因此这里直接 Apply("System") 即可让主窗口、设置窗口和标题栏一起跟随。
+    /// </summary>
+    private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category is not (UserPreferenceCategory.General or UserPreferenceCategory.VisualStyle))
+            return;
+
+        Ui(() => ThemeService.Apply("System"));
+    }
+
     // ------------------------------------------------------------------ 退出
 
     public void ExitApp()
@@ -402,6 +419,15 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        try
+        {
+            SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        }
+        catch
+        {
+            // 忽略
+        }
+
         try
         {
             if (_tray is not null) { _tray.Visible = false; _tray.Dispose(); }

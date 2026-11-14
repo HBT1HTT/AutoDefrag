@@ -24,8 +24,6 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
     private bool _completionSound;
     private double _cpuThreshold;
     private string _timeText;
-    private string _selectedFont;
-    private string _themeMode;
     private string _engineMode;
     private bool _timeInvalid;
 
@@ -53,8 +51,6 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         _minimizeToTray = _vm.MinimizeToTray;
         _completionSound = _vm.CompletionSound;
         _cpuThreshold = _vm.CpuThreshold;
-        _selectedFont = _vm.SelectedFont;
-        _themeMode = _vm.ThemeMode;
         _engineMode = _vm.EngineMode;
         _fragThresholdEnabled = _vm.FragThresholdEnabled;
         _fragThresholdText = _vm.FragThresholdPercent.ToString();
@@ -74,19 +70,6 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         var workArea = SystemParameters.WorkArea;
         Width = Math.Min(Width, Math.Max(MinWidth, workArea.Width - 24));
         Height = Math.Min(Height, Math.Max(MinHeight, workArea.Height - 24));
-
-        switch (_themeMode)
-        {
-            case "Light":
-                ThemeLight.IsChecked = true;
-                break;
-            case "Dark":
-                ThemeDark.IsChecked = true;
-                break;
-            default:
-                ThemeSystem.IsChecked = true;
-                break;
-        }
 
         switch (_engineMode)
         {
@@ -123,20 +106,6 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
     }
 
     // ---------------------------------------------------------------- 草稿字段
-
-    public IReadOnlyList<string> FontNames => _vm.FontNames;
-
-    public string SelectedFont
-    {
-        get => _selectedFont;
-        set => SetField(ref _selectedFont, value);
-    }
-
-    public string SelectedTheme
-    {
-        get => _themeMode;
-        set => SetField(ref _themeMode, value);
-    }
 
     public string EngineMode
     {
@@ -301,13 +270,6 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         _fragThresholdInvalid ? Visibility.Visible : Visibility.Collapsed;
 
     // ---------------------------------------------------------------- 操作
-
-    private void Theme_Checked(object sender, RoutedEventArgs e)
-    {
-        if (!IsLoaded) return;
-        if ((sender as FrameworkElement)?.Tag is string tag)
-            SelectedTheme = tag;
-    }
 
     private void Engine_Checked(object sender, RoutedEventArgs e)
     {
@@ -523,8 +485,6 @@ public partial class SettingsWindow : Window, INotifyPropertyChanged
         _vm.AutoStart = _autoStart;
         _vm.MinimizeToTray = _minimizeToTray;
         _vm.CompletionSound = _completionSound;
-        _vm.SelectedFont = _selectedFont;
-        _vm.SetTheme(_themeMode);
         _vm.EngineMode = _engineMode;
         _vm.ApplyDefragSettings(defrag);
 

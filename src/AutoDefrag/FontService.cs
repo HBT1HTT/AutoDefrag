@@ -4,9 +4,9 @@ using FontFamily = System.Windows.Media.FontFamily;
 namespace AutoDefrag;
 
 /// <summary>
-/// 界面字体：推荐 Segoe UI Variable（Windows 11 自带可变字体），
+/// 界面字体：固定使用 Segoe UI Variable（Windows 11 自带可变字体），
 /// 并以微软雅黑 UI 兜底中文字形，避免缺字时出现方框。
-/// 用户选择的字体族名写入 config.json 的 UiFont；空值表示推荐默认。
+/// 1.9.6 起不再提供字体选择入口，Apply 始终传空值使用推荐默认。
 /// </summary>
 public static class FontService
 {

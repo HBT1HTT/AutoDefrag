@@ -17,7 +17,7 @@ public static class ThemeService
 
     public static void Apply(string mode)
     {
-        IsDark = mode == "Dark" || (mode == "System" && SystemPrefersDark());
+        IsDark = ResolveIsDark(mode, SystemPrefersDark());
 
         var accent = GetSystemAccentColor();
 
@@ -66,6 +66,13 @@ public static class ThemeService
 
         ThemeChanged?.Invoke();
     }
+
+    /// <summary>
+    /// 主题决策：Light 固定浅色，Dark 固定深色，System 读取 Windows“应用主题”。
+    /// 浅色/深色两套色板都已实现，因此 System 不是“只有暗色”的假跟随。
+    /// </summary>
+    public static bool ResolveIsDark(string mode, bool systemPrefersDark) =>
+        mode == "Dark" || (mode == "System" && systemPrefersDark);
 
     /// <summary>主题切换完成（用于需要重建视觉元素的地方，例如富文本日志的着色）。</summary>
     public static event Action? ThemeChanged;

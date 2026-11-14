@@ -28,12 +28,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string? _triggeredDate;
     private bool _suppressSave;
     private bool _isBusy;
+    private bool _scanningDisks;
     private bool _isTimeInvalid;
     private string _statusText = "空闲";
     private string _footerHint = string.Empty;
     private string _lastResultText = "暂无执行记录";
-    private readonly IReadOnlyList<string> _fontNames;
-    private string _selectedFont;
     private string _largeClusterHint = string.Empty;
     private bool _locationWarningShown;
 
@@ -43,11 +42,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private int _progressPercent = -1;
     private string _progressTitle = "就绪";
     private string _progressDetail = string.Empty;
-    private string _progressPercentText = "就绪";
-    private string _progressLogText = string.Empty;
-    private readonly ObservableCollection<string> _progressLines = new();
+    private string _progressTaskLine = string.Empty;
     private long _progressOffset;
-    private const int ProgressLogMaxLines = 200;
+    private int _barPhase;
+    private const int ProgressBarCells = 38;
     private bool _completionSoundPlayed;
 
     public MainViewModel(AppConfig config, ConfigStore store)
@@ -55,19 +53,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _config = config;
         _store = store;
         _lastClock = config.RunAtStartup ? "03:00" : config.DailyTime;
-
-        _fontNames = FontService.Names;
-        var savedFont = (config.UiFont ?? string.Empty).Trim();
-        if (savedFont.Length > 0 && FontService.IsInstalled(savedFont))
-        {
-            _selectedFont = savedFont;
-        }
-        else
-        {
-            _selectedFont = FontService.ResolveRecommended();
-            if (savedFont.Length > 0)
-                Logger.Warn($"配置的界面字体不可用: {savedFont}，已回退到 {_selectedFont}");
-        }
 
         _watchTimer.Interval = TimeSpan.FromMilliseconds(1200);
         _watchTimer.Tick += (_, _) => OnWatchTick();
@@ -77,27 +62,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     public ObservableCollection<DiskItem> Disks { get; } = new();
-
-    /// <summary>系统已安装字体族名，供设置里的字体下拉使用。</summary>
-    public IReadOnlyList<string> FontNames => _fontNames;
-
-    /// <summary>当前界面字体；切换后立即应用并写入 config.json 的 UiFont。</summary>
-    public string SelectedFont
-    {
-        get => _selectedFont;
-        set
-        {
-            if (string.IsNullOrWhiteSpace(value)) return;
-            if (string.Equals(_selectedFont, value, StringComparison.OrdinalIgnoreCase)) return;
-
-            _selectedFont = value;
-            _config.UiFont = value;
-            _store.Save(_config);
-            FontService.Apply(value);
-            Logger.Info("界面字体已切换: " + value);
-            OnPropertyChanged();
-        }
-    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action<string, string, NotifyLevel>? NotificationRequested;
@@ -177,7 +141,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     // ---------------------------------------------------------------- 磁盘列表
 
-    public void RefreshDisks()
+    public void RefreshDisks(bool pruneMissingSelections = false)
     {
         var firstRun = _config.SelectedDrives is null;
 
@@ -193,13 +157,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
             string? toolTip = null;
             if (DiskService.IsLargeCluster(clusterBytes))
             {
-                var effective = EngineResolver.Effective(_config.EngineMode, clusterBytes);
+                var manualSystem = DefragPolicy.UseSystemOnLargeCluster(
+                    _config.EngineMode, clusterBytes, _config.AllowLargeClusterSystem);
+                var effective = manualSystem ? "System" : EngineResolver.Effective(_config.EngineMode, clusterBytes);
                 var ssdOptimize = _config.SsdOptimizeOnly && DiskService.GetMediaKind(drive) == DiskMediaKind.Ssd;
-                toolTip = effective == "System"
-                    ? $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），Windows 自带的整理对它无效，选中后会被跳过并提示原因。"
-                    : ssdOptimize
-                        ? $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），且是固态硬盘：默认只做系统优化，不重写文件（可在设置里关闭）。"
-                        : $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），会用本程序重写文件来整理，逐个处理、可随时停止。";
+                toolTip = manualSystem
+                    ? $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}）；你已在设置中允许大簇卷使用系统整理，将调用 Windows 自带 defrag。"
+                    : effective == "System"
+                        ? $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），系统整理默认跳过；可在设置中开启「允许大簇卷使用系统整理」手动覆盖。"
+                        : ssdOptimize
+                            ? $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），且是固态硬盘：默认只做系统优化，不重写文件（可在设置里关闭）。"
+                            : $"这块磁盘的存储块比较大（每块 {DiskService.ClusterText(clusterBytes)}），会用本程序重写文件来整理，逐个处理、可随时停止。";
             }
 
             Disks.Add(new DiskItem(
@@ -220,6 +188,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _store.Save(_config);
             Logger.Info("首次运行：默认勾选全部本地固定磁盘 (" + string.Join(",", _config.SelectedDrives) + ")");
         }
+        else if (pruneMissingSelections && _config.SelectedDrives is not null)
+        {
+            // 显式重新扫描时，把已经消失的盘从勾选里清掉，避免整理阶段拿到不存在的盘符。
+            var removed = _config.SelectedDrives
+                .Where(letter => !Disks.Any(d => string.Equals(d.Letter, letter, StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+            if (removed.Count > 0)
+            {
+                _config.SelectedDrives = _config.SelectedDrives
+                    .Where(letter => !removed.Contains(letter, StringComparer.OrdinalIgnoreCase))
+                    .ToList();
+                _store.Save(_config);
+                Logger.Info("重新扫描：已移除不存在的磁盘勾选 " + string.Join(",", removed));
+            }
+        }
         _suppressSave = false;
 
         UpdateLargeClusterHint();
@@ -232,6 +215,52 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RaiseSelectionSummary();
     }
 
+    /// <summary>整理或预演进行中时不允许重新扫描，避免磁盘列表在任务中途变化。</summary>
+    public bool CanRescanDisks => !IsBusy && !_previewing && !_scanningDisks;
+
+    private bool ScanningDisks
+    {
+        get => _scanningDisks;
+        set
+        {
+            if (_scanningDisks == value) return;
+            _scanningDisks = value;
+            OnPropertyChanged(nameof(CanRescanDisks));
+        }
+    }
+
+    /// <summary>
+    /// 主界面“扫描磁盘”：重新枚举固定盘，保留仍在列表中磁盘的勾选状态，
+    /// 新增盘以未勾选方式出现，已消失的盘从列表与勾选里一起移除。
+    /// </summary>
+    public async void RescanDisks()
+    {
+        if (!CanRescanDisks)
+        {
+            FooterHint = IsBusy ? "正在整理，暂时不能重新扫描磁盘" : "正在扫描磁盘，请稍候";
+            return;
+        }
+
+        ScanningDisks = true;
+        FooterHint = "正在重新扫描本地固定磁盘…";
+        try
+        {
+            await Task.Yield();   // 先让界面把“正在扫描”画出来
+            RefreshDisks(pruneMissingSelections: true);
+            FooterHint = $"已重新扫描：发现 {Disks.Count} 块本地固定磁盘";
+            Logger.Info($"手动扫描磁盘完成：{Disks.Count} 块（{string.Join(",", Disks.Select(d => d.Letter))}）");
+        }
+        catch (Exception ex)
+        {
+            FooterHint = "重新扫描磁盘失败：" + ex.Message;
+            Logger.Warn("重新扫描磁盘失败: " + ex);
+        }
+        finally
+        {
+            ScanningDisks = false;
+        }
+    }
+
     /// <summary>用通俗说法提示“这块磁盘走了哪条整理路径”。</summary>
     private void UpdateLargeClusterHint()
     {
@@ -241,17 +270,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
             var clusterBytes = Native.GetClusterSize(disk.Letter);
             if (!DiskService.IsLargeCluster(clusterBytes)) continue;
 
-            var effective = EngineResolver.Effective(_config.EngineMode, clusterBytes);
+            var manualSystem = DefragPolicy.UseSystemOnLargeCluster(
+                _config.EngineMode, clusterBytes, _config.AllowLargeClusterSystem);
+            var effective = manualSystem ? "System" : EngineResolver.Effective(_config.EngineMode, clusterBytes);
             var auto = _config.EngineMode == EngineResolver.Auto ? "自动判断为" : string.Empty;
             var info = DiskService.GetFixedDrives()
                 .FirstOrDefault(d => string.Equals(DiskService.Letter(d), disk.Letter, StringComparison.OrdinalIgnoreCase));
             var ssdOptimize = _config.SsdOptimizeOnly && info is not null &&
                               DiskService.GetMediaKind(info) == DiskMediaKind.Ssd;
-            notes.Add(effective == "System"
-                ? $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），{auto}Windows 自带整理对它无效，会自动跳过并写日志"
-                : ssdOptimize
-                    ? $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），{auto}固态硬盘默认只做系统优化、不重写文件"
-                    : $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），{auto}用本程序重写文件来整理");
+            notes.Add(manualSystem
+                ? $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），已手动允许大簇卷使用系统整理"
+                : effective == "System"
+                    ? $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），{auto}系统整理默认跳过，可在设置中手动允许"
+                    : ssdOptimize
+                        ? $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），{auto}固态硬盘默认只做系统优化、不重写文件"
+                        : $"{disk.Letter} 的存储块较大（每块 {DiskService.ClusterText(clusterBytes)}），{auto}用本程序重写文件来整理");
         }
 
         _largeClusterHint = notes.Count > 0 ? string.Join("；", notes) + "。" : string.Empty;
@@ -508,20 +541,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public string CpuThresholdText => $"{_config.CpuThreshold}%";
 
-    public string ThemeMode => _config.Theme;
-
-    public void SetTheme(string mode)
-    {
-        if (mode is not ("System" or "Light" or "Dark")) return;
-        if (_config.Theme == mode) return;
-
-        _config.Theme = mode;
-        _store.Save(_config);
-        ThemeService.Apply(mode);
-        Logger.Info("主题已切换: " + mode);
-        OnPropertyChanged(nameof(ThemeMode));
-    }
-
     public string NextRunText
     {
         get
@@ -688,6 +707,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _isBusy = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(CanStart));
+            OnPropertyChanged(nameof(CanRescanDisks));
             OnPropertyChanged(nameof(StartButtonText));
             OnPropertyChanged(nameof(StopButtonVisibility));
             RaiseProgressStateChanged();
@@ -725,27 +745,47 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public Visibility ProgressTrackVisibility =>
         ProgressActive ? Visibility.Visible : Visibility.Collapsed;
 
-    /// <summary>百分比未知时走不确定态（动画条），不编造进度。</summary>
+    /// <summary>百分比未知时走不确定态，不编造百分比。</summary>
     public bool ProgressIndeterminate => ProgressActive && _progressPercent < 0;
 
     public double ProgressPercentValue => _progressPercent < 0 ? 0 : Math.Clamp(_progressPercent, 0, 100);
 
-    public string ProgressPercentText => _progressPercentText;
+    public string ProgressPercentText =>
+        _progressPercent >= 0
+            ? $"{Math.Clamp(_progressPercent, 0, 100)}%"
+            : ProgressActive ? "…" : "就绪";
+
     public string ProgressTitle => _progressTitle;
     public string ProgressDetail => _progressDetail;
     public string ProgressGlyph => ProgressExpanded ? "▾" : "▸";
     public string ProgressToggleTip => ProgressExpanded ? "收起整理详情" : "展开整理详情";
 
-    /// <summary>类 cmd 的滚动日志，最多保留最近 200 行。</summary>
-    public string ProgressLogText
+    /// <summary>
+    /// 上节固定进度条：等号填充 + 末尾百分数，纯文本渲染，不使用 ProgressBar 方块。
+    /// 未知进度时显示一段缓慢移动的等号，表示“正在分析”，但不编造数值。
+    /// </summary>
+    public string ProgressBarText => FormatProgressBar(_progressPercent, ProgressActive, _barPhase);
+
+    /// <summary>纯函数形式，便于测试：等号填充长度按百分比取整，未填充位置用不换行空格占位。</summary>
+    public static string FormatProgressBar(int percent, bool active, int phase)
     {
-        get => _progressLogText;
-        private set
+        var cells = new char[ProgressBarCells];
+        for (var i = 0; i < cells.Length; i++) cells[i] = '\u00A0';
+
+        if (active && percent < 0)
         {
-            if (_progressLogText == value) return;
-            _progressLogText = value;
-            OnPropertyChanged();
+            const int chunk = 9;
+            var start = Math.Abs(phase) % (ProgressBarCells - chunk + 1);
+            for (var i = start; i < start + chunk; i++) cells[i] = '=';
         }
+        else if (active)
+        {
+            var filled = (int)Math.Round(Math.Clamp(percent, 0, 100) / 100.0 * ProgressBarCells);
+            for (var i = 0; i < filled; i++) cells[i] = '=';
+        }
+
+        var label = !active ? "就绪" : percent < 0 ? "…" : $"{Math.Clamp(percent, 0, 100)}%";
+        return new string(cells) + " " + label;
     }
 
     private void RaiseProgressStateChanged()
@@ -757,6 +797,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(ProgressIndeterminate));
         OnPropertyChanged(nameof(ProgressPercentValue));
         OnPropertyChanged(nameof(ProgressPercentText));
+        OnPropertyChanged(nameof(ProgressBarText));
         OnPropertyChanged(nameof(ProgressTitle));
         OnPropertyChanged(nameof(ProgressDetail));
         OnPropertyChanged(nameof(ProgressGlyph));
@@ -770,49 +811,49 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _progressTitle = title;
         _progressDetail = detail;
         _progressPercent = percent >= 0 ? Math.Clamp(percent, 0, 100) : -1;
-        _progressPercentText = _progressPercent >= 0
-            ? $"{_progressPercent}%"
-            : ProgressActive ? "…" : "就绪";
+        if (_progressPercent < 0) _barPhase++;
         RaiseProgressStateChanged();
     }
 
-    /// <summary>新任务开始：清空上一次的日志与百分比，避免界面显示旧的“50%”。</summary>
+    /// <summary>新任务开始：清空上一次的进度与任务行，避免界面显示旧的“50%”。</summary>
     private void BeginProgress(string title)
     {
-        _progressLines.Clear();
-        _progressLogText = string.Empty;
+        _progressTaskLine = string.Empty;
         _progressOffset = 0;
+        _barPhase = 0;
         _stopping = false;
         _completionSoundPlayed = false;
         SetProgress(title, string.Empty, -1);
-        OnPropertyChanged(nameof(ProgressLogText));
     }
 
     private void FinishProgress(string detail)
     {
         _stopping = false;
         _progressPercent = -1;
-        _progressPercentText = "就绪";
         _progressTitle = "就绪";
         _progressDetail = detail;
         RaiseProgressStateChanged();
-        RefreshProgressLog();
     }
 
-    /// <summary>增量读取 progress.log，只保留最近 N 行；同时更新界面日志文本。</summary>
-    private void RefreshProgressLog()
+    /// <summary>
+    /// 增量读取 progress.log，只取最后一条完整行作为预览等场景的当前任务。
+    /// 只消费完整行（ProgressLog.ReadNew 的既有修复），不会截断半行，也不滚动追加。
+    /// </summary>
+    private void RefreshProgressTaskLine()
     {
         var (lines, offset) = ProgressLog.ReadNew(_progressOffset);
         _progressOffset = offset;
         if (lines.Count == 0) return;
 
-        foreach (var line in lines) _progressLines.Add(line);
-        while (_progressLines.Count > ProgressLogMaxLines)
-        {
-            _progressLines.RemoveAt(0);
-        }
+        var line = lines[^1].Trim();
+        if (line.Length > 9 && line[8] == ' ') line = line[9..].Trim();
+        if (line.Length == 0 || string.Equals(line, _progressTaskLine, StringComparison.Ordinal)) return;
 
-        ProgressLogText = string.Join(Environment.NewLine, _progressLines);
+        _progressTaskLine = line;
+
+        // 预览在应用内执行，没有 worker_state；用最新一条进度作为“当前任务”。
+        if (_previewing)
+            SetProgress("正在预览整理计划", line, -1);
     }
 
     // ---------------------------------------------------------------- 触发任务
@@ -947,6 +988,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         _previewing = true;
+        OnPropertyChanged(nameof(CanRescanDisks));
         StatusText = "正在预览";
         FooterHint = $"正在预览 {string.Join("、", drives)} 的整理计划（只读分析，不会改动文件）";
         BeginProgress($"正在预览整理计划 {string.Join("、", drives)}");
@@ -970,6 +1012,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 System.Windows.Application.Current?.Dispatcher.BeginInvoke(new Action(() =>
                 {
                     _previewing = false;
+                    OnPropertyChanged(nameof(CanRescanDisks));
                     if (code == 3)
                     {
                         StatusText = "空闲";
@@ -1023,7 +1066,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void UpdateProgress()
     {
-        RefreshProgressLog();
+        RefreshProgressTaskLine();
+
+        // 预览在应用内执行，进度来自 progress.log 的最新一条，不读 worker_state 的旧状态。
+        if (_previewing) return;
 
         var state = WorkerStateFile.TryLoad();
         if (state is null) return;

@@ -39,11 +39,16 @@ public sealed class AppConfig
     /// <summary>关闭主窗口时最小化到托盘（false 则关闭即退出）。</summary>
     public bool MinimizeToTray { get; set; } = true;
 
-    /// <summary>主题：System / Light / Dark。</summary>
+    /// <summary>
+    /// 主题：System / Light / Dark。
+    /// 1.9.6 起界面固定跟随 Windows 应用主题，本字段仅保留兼容旧配置，不再读取。
+    /// </summary>
     public string Theme { get; set; } = "System";
 
-    /// <summary>界面字体（系统已安装字体族名，例如 "Microsoft YaHei UI"）。
-    /// 空字符串表示使用推荐默认字体（Segoe UI Variable Text + 中文回退）。
+    /// <summary>
+    /// 界面字体（系统已安装字体族名）。
+    /// 1.9.6 起固定使用推荐默认字体（Segoe UI Variable Text + 中文回退），
+    /// 本字段仅保留兼容旧配置，不再读取；旧值不会导致启动失败。
     /// </summary>
     public string UiFont { get; set; } = "";
 
