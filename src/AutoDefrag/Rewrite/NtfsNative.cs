@@ -22,7 +22,9 @@ internal static class NtfsNative
     private const uint FileReadAttributes = 0x00000080;
 
     private const uint FsctlGetNtfsVolumeData = 0x00090064;
-    private const uint FsctlGetVolumeBitmap = 0x0009006C;
+    // FSCTL_GET_VOLUME_BITMAP = CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 27, METHOD_NEITHER, FILE_ANY_ACCESS)
+    // 注意是 METHOD_NEITHER（+3），常量是 0x9006F；写成 0x9006C 会一直返回 ERROR_INVALID_FUNCTION(1)。
+    private const uint FsctlGetVolumeBitmap = 0x0009006F;
     private const uint FsctlGetRetrievalPointers = 0x00090073;
 
     private const int ErrorMoreData = 234;
@@ -161,11 +163,27 @@ internal static class NtfsNative
                     handle, FsctlGetVolumeBitmap,
                     inPin.AddrOfPinnedObject(), (uint)inBuffer.Length,
                     outPin.AddrOfPinnedObject(), (uint)outBuffer.Length,
-                    out _, IntPtr.Zero);
+                    out var returnedBytes, IntPtr.Zero);
 
                 var error = Marshal.GetLastWin32Error();
-                if (!ok && error is not (ErrorMoreData or ErrorInsufficientBuffer))
+                if (!ok)
                 {
+                    if (error is ErrorMoreData or ErrorInsufficientBuffer)
+                    {
+                        // 缓冲区不够时按头字段提示扩容：该字段在不同版本上可能是位图字节数或覆盖簇数，
+                        // 这里只在“看起来像簇数”时才除以 8，避免把 24M 簇当成 24MB 字节数。
+                        var hint = BitConverter.ToInt64(outBuffer, 8);
+                        var wanted = hint > 0
+                            ? (hint <= geometry.TotalClusters * 2L ? (hint + 7) / 8 : hint)
+                            : (long)size * 2;
+                        var next = Math.Min(wanted + 64, 512L * 1024 * 1024);
+                        if (next > size)
+                        {
+                            size = (int)next;
+                            continue;
+                        }
+                    }
+
                     // 非管理员/受保护进程下 Windows 对卷位图请求返回 1（ERROR_INVALID_FUNCTION），而不是 5；
                     // 此时空闲布局视为“未知”，计划仍然只依据文件区段 + 卷几何，不受影响。
                     Logger.Warn($"{drive} 读取卷位图失败: Win32Error={error}（{DescribeBitmapError(error)}；" +
@@ -173,22 +191,19 @@ internal static class NtfsNative
                     return null;
                 }
 
-                var bitmapSize = BitConverter.ToInt64(outBuffer, 8);
-                if (bitmapSize <= 0 || bitmapSize > geometry.TotalClusters / 8 + 64)
+                // 以实际写回的字节数为准：16 字节头（StartingLcn + BitmapSize）+ 位图数据。
+                // 旧实现把头部第 8 字节起的字段直接当字节数，在实测中拿到的是簇数（8174），
+                // 触发“位图大小异常”而永远读不到布局。
+                var payload = (int)returnedBytes - 16;
+                if (payload <= 0 || payload > outBuffer.Length - 16)
                 {
-                    Logger.Warn($"{drive} 位图大小异常: {bitmapSize} 字节");
+                    Logger.Warn($"{drive} 位图返回长度异常: {returnedBytes} 字节");
                     return null;
                 }
 
-                if (bitmapSize > size)
-                {
-                    size = (int)Math.Min(bitmapSize + 64, 512L * 1024 * 1024);
-                    continue;
-                }
-
-                var bits = new byte[bitmapSize];
-                Array.Copy(outBuffer, 16, bits, 0, (int)bitmapSize);
-                return new VolumeBitmap(BitConverter.ToInt64(outBuffer, 0), bits, bitmapSize);
+                var bits = new byte[payload];
+                Array.Copy(outBuffer, 16, bits, 0, payload);
+                return new VolumeBitmap(BitConverter.ToInt64(outBuffer, 0), bits, payload);
             }
             finally
             {

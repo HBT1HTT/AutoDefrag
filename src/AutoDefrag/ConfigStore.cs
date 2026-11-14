@@ -17,10 +17,14 @@ public sealed class ConfigStore
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
+    /// <summary>最近一次 Load 是否遇到 config.json 损坏（解析失败）。主界面据此进入安全模式。</summary>
+    public bool LastLoadWasCorrupt { get; private set; }
+
     /// <summary>读取配置；note 用于把迁移/回退情况写进日志。</summary>
     public AppConfig Load(out string? note)
     {
         note = null;
+        LastLoadWasCorrupt = false;
         AppPaths.Ensure();
 
         if (!File.Exists(AppPaths.ConfigFile) &&
@@ -53,7 +57,18 @@ public sealed class ConfigStore
             }
             catch (Exception ex)
             {
-                note = "config.json 解析失败，已回退默认配置：" + ex.Message;
+                LastLoadWasCorrupt = true;
+                // 保留损坏文件的副本，便于排查，也避免“默认配置”直接把现场覆盖掉。
+                try
+                {
+                    var backup = AppPaths.ConfigFile + ".corrupt-" + DateTime.Now.ToString("yyyyMMddHHmmss");
+                    File.Copy(AppPaths.ConfigFile, backup, overwrite: false);
+                    note = $"config.json 解析失败，已恢复默认配置（损坏文件已备份为 {Path.GetFileName(backup)}）：" + ex.Message;
+                }
+                catch
+                {
+                    note = "config.json 解析失败，已回退默认配置：" + ex.Message;
+                }
             }
         }
 

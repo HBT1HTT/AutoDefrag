@@ -47,6 +47,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private int _barPhase;
     private const int ProgressBarCells = 38;
     private bool _completionSoundPlayed;
+    private DateTime _cleanStartedAt;
 
     public MainViewModel(AppConfig config, ConfigStore store)
     {
@@ -826,11 +827,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         SetProgress(title, string.Empty, -1);
     }
 
-    private void FinishProgress(string detail)
+    private void FinishProgress(string detail, string title = "就绪")
     {
         _stopping = false;
         _progressPercent = -1;
-        _progressTitle = "就绪";
+        _progressTitle = title;
         _progressDetail = detail;
         RaiseProgressStateChanged();
     }
@@ -907,6 +908,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                      (_config.FragThresholdEnabled ? $"仅整理碎片率 ≥ {_config.FragThresholdPercent}% 的文件 · " : "全部整理 · ") +
                      $"预计最多 {prefs.MaxRounds} 轮 · CPU 连续 10 秒高于 {_config.CpuThreshold}% 时暂停，回落后自动继续";
         BeginProgress($"正在准备整理 {string.Join("、", drives)}");
+        _cleanStartedAt = DateTime.Now;
     }
 
     /// <summary>请求停止：写停止标记，大簇卷在当前文件结束后停，小簇卷直接结束 defrag 进程。</summary>
@@ -1201,13 +1203,42 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (string.Equals(mode, "clean", StringComparison.OrdinalIgnoreCase))
         {
             RefreshLastResult();
-            StatusText = ok ? "已完成" : "完成，部分未成功";
-            FooterHint = ok ? "整理完成，结果已记录" : "整理结束，有磁盘没能完成，点“查看日志”可以看原因";
-            FinishProgress(ok ? "上次整理已完成" : "上次整理有磁盘未完成");
+            // 整理会改变可用空间，完成后重扫一次，避免列表里的“可用”停留在整理前。
+            RefreshDisks();
+            // 结果页必须显示每块盘的真实结论（例如 VHD 上的“已执行（该卷不提供碎片统计）”），
+            // 不能只写一句“整理完成”，否则用户无法区分“真的整理成功”和“卷不提供统计”。
+            var runEntries = GetRunResultEntries();
+            var runText = string.Join("；", runEntries.Select(e => $"{e.Drive} {e.LastRunStatus}"));
+            var noImproveOnly = runEntries.Count > 0 &&
+                                runEntries.All(e => e.LastRunStatus == "无可改善");
 
-            var message = ok
-                ? (auto ? "今天的自动整理已完成" : "磁盘整理已完成")
-                : (auto ? "今天的自动整理结束，有磁盘没能完成" : "整理结束，有磁盘没能完成");
+            if (noImproveOnly)
+            {
+                StatusText = "已完成（无可改善）";
+                FooterHint = "卷内空闲空间过于分散，本次没有文件能变得更连续；" +
+                             "可开启“机械硬盘合并空闲空间”或先释放空间后重试";
+                FinishProgress(runText.Length > 0 ? $"上次整理无可改善：{runText}" : "上次整理无可改善",
+                    "已完成（无可改善）");
+            }
+            else
+            {
+                StatusText = ok ? "已完成" : "完成，部分未成功";
+                FooterHint = ok
+                    ? (runText.Length > 0 ? $"整理完成：{runText}" : "整理完成，结果已记录")
+                    : (runText.Length > 0
+                        ? $"整理结束：{runText}（点“查看日志”看原因）"
+                        : "整理结束，有磁盘没能完成，点“查看日志”可以看原因");
+                FinishProgress(ok
+                    ? (runText.Length > 0 ? $"上次整理已完成：{runText}" : "上次整理已完成")
+                    : (runText.Length > 0 ? $"上次整理有磁盘未完成：{runText}" : "上次整理有磁盘未完成"),
+                    ok ? "已完成" : "已结束");
+            }
+
+            var message = noImproveOnly
+                ? "本次没有可改善的文件（卷内空闲空间过于分散）"
+                : ok
+                    ? (auto ? "今天的自动整理已完成" : "磁盘整理已完成")
+                    : (auto ? "今天的自动整理结束，有磁盘没能完成" : "整理结束，有磁盘没能完成");
             NotificationRequested?.Invoke("AutoDefrag", message, ok ? NotifyLevel.Info : NotifyLevel.Warning);
 
             // 只有真正成功完成才响；失败、被停止（exit=4）在上面已经返回，不会走到这里
@@ -1222,6 +1253,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         OnPropertyChanged(nameof(NextRunText));
+    }
+
+    /// <summary>
+    /// 取本次整理写入 drive_status.json 的每盘结论（LastRunAt 不早于本次开始时间）。
+    /// 只用于界面结果展示；文件缺失/时间解析失败时返回空列表，不影响完成流程。
+    /// </summary>
+    private List<DriveStatusEntry> GetRunResultEntries()
+    {
+        var file = DriveStatusFile.TryLoad();
+        if (file is null) return new List<DriveStatusEntry>();
+
+        var since = _cleanStartedAt.AddSeconds(-5);
+        return file.Drives
+            .Where(e => !string.IsNullOrEmpty(e.LastRunStatus) &&
+                        DateTime.TryParse(e.LastRunAt, out var at) && at >= since)
+            .ToList();
     }
 
     /// <summary>一次任务最多响一次，避免 watcher 与完成回调同时到达时重复播放。</summary>

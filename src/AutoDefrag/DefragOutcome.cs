@@ -67,7 +67,15 @@ public readonly record struct FragParseResult(double? Percent, string Method)
 public static class DefragOutputParser
 {
     private static readonly Regex FragLabelRegex = new(
-        @"(fragmented\s+space|total\s+fragmented|总碎片空间|總碎片空間|碎片空間|zerstreuter|fragmentierter|espace\s+fragment|espacio\s+fragmentado|断片化)",
+        @"(fragmented\s+space|total\s+fragmented|总碎片空间|碎片空间|總碎片空間|碎片空間|zerstreuter|fragmentierter|espace\s+fragment|espacio\s+fragmentado|断片化)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// 明确不是“碎片率”的百分比指标，例如 VHD 上的“空间效率 = 100%”。
+    /// 这类键名不能进入“唯一百分比兜底”，否则会把 100% 空间效率误当成 100% 碎片率。
+    /// </summary>
+    private static readonly Regex NonFragLabelRegex = new(
+        @"(空间效率|空間效率|space\s+efficiency|可用空间|free\s+space|slab|缓存|cache|已整理|重新剪裁|retrim|optimiz)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex PercentValueRegex = new(
@@ -81,7 +89,8 @@ public static class DefragOutputParser
         if (string.IsNullOrWhiteSpace(report)) return new FragParseResult(null, "无输出");
 
         var candidates = new List<double>();
-        foreach (var rawLine in report.Split('\n'))
+        // OutputCapture 为了日志紧凑把换行替换成 " | "；真实运行与测试报告都可能用这两种分隔。
+        foreach (var rawLine in report.Split(new[] { "\r\n", "\n", " | " }, StringSplitOptions.RemoveEmptyEntries))
         {
             var line = rawLine.Trim();
             if (line.Length == 0) continue;
@@ -94,12 +103,15 @@ public static class DefragOutputParser
             if (value.Length == 0) continue;
 
             var isFragKey = FragLabelRegex.IsMatch(key);
+            var isNonFragKey = NonFragLabelRegex.IsMatch(key);
 
             var percentMatch = PercentValueRegex.Match(value);
             if (percentMatch.Success)
             {
                 var number = ParseNumber(percentMatch.Groups[1].Value);
                 if (isFragKey) return new FragParseResult(number, "键名匹配");
+                // “空间效率 100%”“缓存 80%”等不是碎片率，不能参与唯一值兜底
+                if (isNonFragKey) continue;
                 candidates.Add(number);
                 continue;
             }
@@ -148,6 +160,94 @@ public static class DefragOutputParser
         double.TryParse(raw.Replace(",", string.Empty), NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
             ? value
             : 0.0;
+}
+
+/// <summary>
+/// 单块磁盘整理结果的判定输入。抽成纯数据是为了能在不启动 defrag 的情况下做逻辑测试。
+/// </summary>
+public readonly record struct DefragVerdictInput(
+    double? PreFrag,
+    int? ExitCode,
+    string? ErrorCode,
+    string? Output,
+    TimeSpan Elapsed,
+    bool IsLargeCluster,
+    bool IsHdd,
+    bool? IsVirtualVolume);
+
+/// <summary>
+/// 整理结果判定：
+///   - 非 0 退出码、输出中的 FACILITY_DEFRAG 错误码、用户停止，仍按失败/停止处理；
+///   - 虚拟/非物理卷不提供碎片百分比是正常口径，退出码 0 时记为“已执行”，不判失败；
+///   - 退出码 0 且系统明确输出“操作成功完成”时，即使没有碎片统计也按已执行记录（识别不出虚拟盘时的兜底）；
+///   - 其余“退出码 0 但无任何证据”的情况保持原有的“无法确认”，不猜成成功。
+/// </summary>
+public static class DefragOutcomeClassifier
+{
+    public const string ExecutedWithoutFragStats = "已执行（该卷不提供碎片统计）";
+
+    public static bool IsSuccessful(string? status) =>
+        status is "成功" or ExecutedWithoutFragStats;
+
+    public static string Classify(DefragVerdictInput input, out string reason)
+    {
+        if (input.ErrorCode is not null)
+        {
+            reason = "defrag 输出包含错误码 " + input.ErrorCode;
+            return "失败";
+        }
+
+        if (input.ExitCode != 0)
+        {
+            reason = "defrag 退出码为 " + (input.ExitCode?.ToString() ?? "未知");
+            return "失败";
+        }
+
+        var output = input.Output ?? string.Empty;
+        var hasEvidence = output.Length > 0 && input.Elapsed.TotalSeconds >= 5;
+        var explicitSuccess = HasExplicitSuccess(output);
+
+        if (input.IsVirtualVolume == true && input.PreFrag is null)
+        {
+            reason = "虚拟/非物理卷未提供碎片百分比，退出码 0，按“已执行”记录";
+            return ExecutedWithoutFragStats;
+        }
+
+        if (input.PreFrag is null && explicitSuccess && !hasEvidence)
+        {
+            reason = "退出码 0 且系统报告成功，但未提供碎片百分比，按“已执行”记录";
+            return ExecutedWithoutFragStats;
+        }
+
+        if (!hasEvidence && input.IsLargeCluster)
+        {
+            if (input.Elapsed.TotalSeconds < 2)
+            {
+                reason = $"大簇卷在 {input.Elapsed.TotalSeconds:0.#}s 内结束且无有效输出";
+                return "无法确认";
+            }
+
+            reason = "大簇卷未报告进度明细，退出码 0，按成功记录（建议 /A 前后对比）";
+            return "成功";
+        }
+
+        if (!hasEvidence && input.IsHdd && input.PreFrag is null)
+        {
+            reason = "机械盘无有效输出且未解析到碎片率";
+            return "无法确认";
+        }
+
+        reason = input.PreFrag is not null
+            ? "退出码 0，且已解析到碎片率"
+            : "退出码 0，有输出或非机械盘，按成功记录";
+        return "成功";
+    }
+
+    /// <summary>系统明确表示操作成功；用于没有碎片统计时的兜底，不覆盖非 0 退出码/错误码。</summary>
+    public static bool HasExplicitSuccess(string output) =>
+        output.Contains("操作成功完成", StringComparison.Ordinal) ||
+        output.Contains("completed successfully", StringComparison.OrdinalIgnoreCase) ||
+        output.Contains("operation completed successfully", StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>

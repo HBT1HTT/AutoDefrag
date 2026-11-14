@@ -100,6 +100,12 @@ public static class DiskService
             null => DiskMediaKind.Unknown
         };
 
+    /// <summary>
+    /// 卷是否位于虚拟/非物理盘（VHD/VHDX 的 file-backed virtual、虚拟总线、Storage Spaces）。
+    /// true=虚拟；false=物理；null=无法识别。null 只能用于“按未知处理”，不能据此判失败。
+    /// </summary>
+    public static bool? IsVirtualVolume(string driveLetter) => Native.TryIsVirtualVolume(driveLetter);
+
     public static string MediaText(DiskMediaKind kind) => kind switch
     {
         DiskMediaKind.Hdd => "机械硬盘",

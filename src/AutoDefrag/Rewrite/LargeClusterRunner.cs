@@ -417,6 +417,7 @@ public static class LargeClusterRunner
                 ProgressLog.Append($"{drive} [第 {round} 轮 {i + 1}/{total}] 开始：{state.CurrentFile}（{DiskService.FormatBytes(fileBytes)}）");
 
                 var lastSave = DateTime.Now;
+                var lastPhase = "准备";
                 void OnPhase(string phase, long phaseBytes)
                 {
                     state.Phase = phase;
@@ -431,8 +432,12 @@ public static class LargeClusterRunner
                     var elapsed = Math.Max(1.0, (DateTime.Now - fileStarted).TotalSeconds);
                     state.SpeedBytesPerSec = (long)((current - doneBytes) / elapsed);
 
-                    if ((DateTime.Now - lastSave).TotalMilliseconds >= 800)
+                    // 相位切换（复制→校验→替换）必须立即落盘，否则小文件在 800ms 节流内就跑完了，
+                    // 界面下节会一直停在“准备”，看不到真实阶段。
+                    if (!string.Equals(phase, lastPhase, StringComparison.Ordinal) ||
+                        (DateTime.Now - lastSave).TotalMilliseconds >= 800)
                     {
+                        lastPhase = phase;
                         lastSave = DateTime.Now;
                         state.Save();
                     }
@@ -530,13 +535,19 @@ public static class LargeClusterRunner
         var reportPath = RewriteReport.Save(plan, content);
 
         var mergeFailed = mergeRun is not null && mergeRun.Status == "失败";
+        // “新位置区段数没有减少”说明卷内空闲空间过于分散，替身文件落到多个空洞里；
+        // 这种情况必须如实说明，不能把“什么都没改善”记成成功。
+        var noImprove = summary.Results.Count(r =>
+            r.Status == "跳过" && r.Reason.Contains("新位置区段数没有减少", StringComparison.Ordinal));
         var status = summary.Stopped || mergeRun?.Status == "已停止"
             ? "已停止"
             : mergeFailed
                 ? (summary.Succeeded > 0 ? "部分成功" : "失败")
                 : summary.Results.Count == 0 && mergeRun is null
                     ? "无可整理文件"
-                    : summary.Failed > 0 ? "部分成功" : "成功";
+                    : summary.Failed > 0 ? "部分成功"
+                    : summary.Succeeded == 0 && noImprove > 0 ? "无可改善"
+                    : "成功";
 
         var winText = winBefore?.FragPercent is not null || winAfter?.FragPercent is not null
             ? $"，Windows /A {FormatFrag(winBefore?.FragPercent)} -> {FormatFrag(winAfter?.FragPercent)}"
@@ -548,6 +559,13 @@ public static class LargeClusterRunner
             $"{drive} 文件级整理完成：{Math.Max(1, summary.Rounds)} 轮（补扫 {summary.RelaxedRounds} 轮），成功 {summary.Succeeded}、失败 {summary.Failed}、跳过 {summary.Skipped}，" +
             $"本程序口径 {fragBefore:0.##}% -> {fragAfter:0.##}%，覆盖率 {(coverageFinal is null ? "未知" : $"{coverageFinal:0.#}%")}（仅已分析文件）" +
             winText + mergeText;
+
+        // 空闲空间过于分散时，替身文件仍会被拆成多段；必须在结果里说清原因和可操作建议，不能只报“成功/跳过”。
+        if (noImprove > 0)
+        {
+            message += $"，{noImprove} 个因卷内空闲空间过于分散未能改善" +
+                       "（可开启“机械硬盘合并空闲空间”或先释放空间后重试）";
+        }
 
         Logger.Info(message);
         Logger.Info($"报告: {reportPath ?? "(写入失败)"}");

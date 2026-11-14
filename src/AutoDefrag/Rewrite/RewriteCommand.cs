@@ -14,6 +14,7 @@ public static class RewriteCommand
 
     public static int Run(string[] args)
     {
+        AppPaths.ApplyRootOverride(args);
         Logger.Init("engine");
         AppPaths.Ensure();
 

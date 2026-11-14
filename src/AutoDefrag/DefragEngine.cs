@@ -251,10 +251,10 @@ public static class DefragEngine
 
             // /D /X 合并执行失败时回退为只 /D：空闲合并失败不能连带把文件整理也记成成功或放弃
             string mergeStatus = plan.MergeRequested
-                ? (run.Status == "成功" ? "成功" : run.Status)
+                ? (DefragOutcomeClassifier.IsSuccessful(run.Status) ? "成功" : run.Status)
                 : "未启用";
             string mergeDetail = plan.Reason;
-            if (plan.MergeRequested && run.Status != "成功")
+            if (plan.MergeRequested && !DefragOutcomeClassifier.IsSuccessful(run.Status))
             {
                 var fallback = BuildPlan(drive, media, preFrag, volumeBytes, freeBytes, clusterBytes,
                     new MergeGate(false, "合并空闲空间失败，回退为只整理碎片", preFrag, 0, null));
@@ -269,7 +269,7 @@ public static class DefragEngine
                     Suspended = fallbackRun.Suspended + run.Suspended,
                     Resumed = fallbackRun.Resumed + run.Resumed
                 };
-                run = fallbackRun.Status == "成功"
+                run = DefragOutcomeClassifier.IsSuccessful(fallbackRun.Status)
                     ? fallbackRun with { Status = "部分成功", MergeStatus = mergeStatus, MergeDetail = mergeDetail }
                     : fallbackRun with { MergeStatus = mergeStatus, MergeDetail = mergeDetail };
             }
@@ -300,7 +300,7 @@ public static class DefragEngine
                 ManualLargeClusterOverride: manualLargeOverride));
         }
 
-        var okCount = results.Count(r => r.Status == "成功");
+        var okCount = results.Count(r => DefragOutcomeClassifier.IsSuccessful(r.Status));
         var total = results.Count;
         var summary = string.Join("; ", results.Select(r =>
             $"{r.Drive}[{DiskService.MediaText(r.Media)} 存储块={DiskService.ClusterText(r.ClusterBytes)} {r.Arguments} " +
@@ -399,6 +399,7 @@ public static class DefragEngine
 
             double? frag;
             bool probed;
+            var noFragStats = false;
             if (DiskService.IsLargeCluster(clusterBytes))
             {
                 // 大簇卷：defrag /A 会给出不可信的 0%，改用位图 + Runlist 自算
@@ -411,7 +412,21 @@ public static class DefragEngine
             {
                 var probe = Probe(drive, volumeBytes, cpuThreshold, highSeconds, lowSeconds, state, "预检");
                 frag = probe.FragPercent;
-                probed = probe.FragPercent is not null;
+
+                // 虚拟/非物理卷的 /A 可能只输出“空间效率”，没有碎片百分比；
+                // 退出码 0 且无错误码表示探测本身成功，按“已读取（不提供统计）”记录，不报读取失败。
+                noFragStats = probe.FragPercent is null &&
+                              probe.ExitCode == 0 &&
+                              FindErrorCode(probe.Output) is null &&
+                              (DiskService.IsVirtualVolume(drive) == true ||
+                               DefragOutcomeClassifier.HasExplicitSuccess(probe.Output));
+                probed = probe.FragPercent is not null || noFragStats;
+
+                if (noFragStats)
+                {
+                    Logger.Info($"{drive} 是虚拟/非物理卷：/A 正常返回但未提供碎片百分比，" +
+                                "按“已读取（该卷不提供碎片统计）”记录，不报读取失败");
+                }
 
                 if (probe.Stopped)
                 {
@@ -441,6 +456,7 @@ public static class DefragEngine
                 FreeSpaceGB = info is null ? null : Math.Round(SafeFreeBytes(info) / 1024.0 / 1024 / 1024, 2),
                 FragPercent = frag,
                 Probed = probed,
+                FragStatsUnavailable = noFragStats,
                 LastRunAt = previousEntry?.LastRunAt ?? string.Empty,
                 LastRunStatus = previousEntry?.LastRunStatus ?? string.Empty,
                 LastErrorCode = previousEntry?.LastErrorCode ?? string.Empty
@@ -450,7 +466,8 @@ public static class DefragEngine
         file.Save();
 
         var summary = string.Join("; ", file.Drives.Select(d =>
-            $"{d.Drive}(碎片={FormatFrag(d.FragPercent)},剩余={d.FreeSpaceGB?.ToString() ?? "--"}GB/共={d.VolumeSizeGB?.ToString() ?? "--"}GB,读取={(d.Probed ? "成功" : "失败")})"));
+            $"{d.Drive}(碎片={FormatFrag(d.FragPercent)},剩余={d.FreeSpaceGB?.ToString() ?? "--"}GB/共={d.VolumeSizeGB?.ToString() ?? "--"}GB," +
+            $"读取={(d.Probed ? (d.FragStatsUnavailable ? "成功（不提供统计）" : "成功") : "失败")})"));
         Logger.Info("磁盘检查完成: " + summary);
         // 检查磁盘只更新 drive_status.json，绝不覆盖 last_result.txt（那是整理结果）
 
@@ -564,6 +581,18 @@ public static class DefragEngine
         var capture = new OutputCapture();
 
         Logger.Info($"开始{plan.Verb} {drive}   命令=defrag.exe {plan.CommandLine}   CPU阈值={cpuThreshold}%");
+
+        // 卷类型只用于“没有碎片统计时如何判定”，不参与命令参数选择。
+        // 识别失败返回 null，后续按退出码与输出判定，绝不因此把正常退出判成失败。
+        var isVirtualVolume = DiskService.IsVirtualVolume(drive);
+        if (isVirtualVolume is null)
+        {
+            Logger.Warn($"{drive} 卷类型识别失败（无法读取物理盘总线类型）：按退出码与输出判定，不据此判失败");
+        }
+        else if (isVirtualVolume.Value)
+        {
+            Logger.Info($"{drive} 卷类型识别: 虚拟/非物理卷；没有碎片百分比时按“已执行”记录");
+        }
 
         System.Diagnostics.Process? process;
         try
@@ -735,7 +764,9 @@ public static class DefragEngine
         var elapsed = endTime - startTime;
         var output = capture.Text;
         var errorCode = FindErrorCode(output);
-        var status = stopped ? "已停止" : ClassifyResult(plan, preFrag, exitCode, errorCode, output, elapsed);
+        var status = stopped
+            ? "已停止"
+            : ClassifyResult(plan, preFrag, exitCode, errorCode, output, elapsed, isVirtualVolume);
         if (errorCode is not null)
         {
             Logger.Warn($"{drive} {plan.Verb}错误码解释: {errorCode} -> {DefragResultCodes.Describe(errorCode)}");
@@ -775,14 +806,15 @@ public static class DefragEngine
         state.Save();
 
         var run = RunOneDrive(drive, plan, null, cpuThreshold, highSeconds, lowSeconds, state);
-        var status = run.Status switch
-        {
-            "成功" => "成功",
-            "已停止" => "已停止",
-            "可能不支持" => "未确认",
-            "无法确认" => "无法确认",
-            _ => "失败"
-        };
+        var status = DefragOutcomeClassifier.IsSuccessful(run.Status)
+            ? "成功"
+            : run.Status switch
+            {
+                "已停止" => "已停止",
+                "可能不支持" => "未确认",
+                "无法确认" => "无法确认",
+                _ => "失败"
+            };
 
         var detail = status switch
         {
@@ -872,9 +904,19 @@ public static class DefragEngine
 
             if (frag is null)
             {
-                // 解析失败只降级为“未知”：不推断成 0%、不判定“无需整理”、也不影响退出码判断
-                Logger.Warn($"读取碎片情况失败({drive}): exit={FormatExit(exitCode)}, 错误码={errorCode ?? "无"}, " +
-                            $"解析={parsed.Method}，按“未知”处理（不据此跳过或判定成功），输出片段=\"{ClipForLog(output)}\"");
+                // 解析失败只降级为“未知”：不推断成 0%、不判定“无需整理”、也不影响退出码判断。
+                // 虚拟卷（VHD/VHDX）的 /A 本来就可能只给“空间效率”而不给碎片百分比，这种情况按正常信息记录，
+                // 不再用 WARN 制造“读取失败”的错觉。
+                if (exitCode == 0 && errorCode is null && DiskService.IsVirtualVolume(drive) == true)
+                {
+                    Logger.Info($"该卷不提供碎片百分比({drive}): exit=0，解析={parsed.Method}，" +
+                                $"按“未知”处理（不据此判定成功或跳过），输出片段=\"{ClipForLog(output)}\"");
+                }
+                else
+                {
+                    Logger.Warn($"读取碎片情况失败({drive}): exit={FormatExit(exitCode)}, 错误码={errorCode ?? "无"}, " +
+                                $"解析={parsed.Method}，按“未知”处理（不据此跳过或判定成功），输出片段=\"{ClipForLog(output)}\"");
+                }
             }
             else if (errorCode is not null)
             {
@@ -1019,42 +1061,27 @@ public static class DefragEngine
         return new ProbeGuardOutcome(suspended, resumed, stopped);
     }
 
-    /// <summary>按输出证据与介质判定本次整理结果，不只依赖退出码。</summary>
+    /// <summary>按输出证据、退出码与卷类型判定本次整理结果，不只依赖退出码。</summary>
     private static string ClassifyResult(
-        DefragPlan plan, double? preFrag, int? exitCode, string? errorCode, string output, TimeSpan elapsed)
+        DefragPlan plan, double? preFrag, int? exitCode, string? errorCode, string output, TimeSpan elapsed,
+        bool? isVirtualVolume)
     {
-        if (errorCode is not null) return "失败";
-        if (exitCode != 0) return "失败";
+        var verdict = DefragOutcomeClassifier.Classify(
+            new DefragVerdictInput(
+                preFrag, exitCode, errorCode, output, elapsed,
+                DiskService.IsLargeCluster(plan.ClusterBytes),
+                plan.Media == DiskMediaKind.Hdd,
+                isVirtualVolume),
+            out var reason);
 
-        var hasEvidence = HasOperationEvidence(output, elapsed);
+        var virtualText = isVirtualVolume is null ? "未知" : isVirtualVolume.Value ? "是" : "否";
+        if (verdict == "失败")
+            Logger.Warn($"{plan.Drive} 结果判定: 失败；{reason}（exit={FormatExit(exitCode)}, 虚拟卷={virtualText}）");
+        else
+            Logger.Info($"{plan.Drive} 结果判定: {verdict}；{reason}（exit={FormatExit(exitCode)}, 虚拟卷={virtualText}）");
 
-        // 大簇卷：系统整理的行为随卷/版本差异很大，用户实测 64KB 卷上系统整理可把 /A 从 19% 降到 2%。
-        // 因此不再把“没有进度输出”直接判为不支持：退出码为 0 且耗时正常时按成功记录，并提示用 /A 复核。
-        if (!hasEvidence && DiskService.IsLargeCluster(plan.ClusterBytes))
-        {
-            if (elapsed.TotalSeconds < 2)
-            {
-                Logger.Warn($"{plan.Drive} 系统整理结束过快（{elapsed.TotalSeconds:0.#}s）且无输出，结果按“无法确认”处理");
-                return "无法确认";
-            }
-
-            Logger.Info($"{plan.Drive} 大簇卷系统整理未报告进度明细（exit=0，用时 {elapsed.TotalSeconds:0}s）：" +
-                        "按成功记录；大簇卷上系统整理可能有效，建议用 /A 前后对比确认");
-            return "成功";
-        }
-
-        // 机械硬盘读不到碎片情况、且看不到实际整理过程 -> 无法确认
-        if (!hasEvidence && plan.Media == DiskMediaKind.Hdd && preFrag is null) return "无法确认";
-
-        return "成功";
+        return verdict;
     }
-
-    /// <summary>
-    /// 是否有“defrag 确实干活了”的旁证：有输出且运行时间明显超过启停开销。
-    /// 真实整理/优化不可能在几秒内完成；1 秒左右且无实际输出的情况一律不认成功。
-    /// </summary>
-    private static bool HasOperationEvidence(string output, TimeSpan elapsed) =>
-        output.Length > 0 && elapsed.TotalSeconds >= 5;
 
     private static string? FindErrorCode(string output)
     {
@@ -1206,6 +1233,10 @@ public static class DefragEngine
                 entry.LastRunAt = result.EndTime.ToString("yyyy-MM-dd HH:mm:ss");
                 entry.LastRunStatus = result.Status;
                 entry.LastErrorCode = result.ErrorCode ?? string.Empty;
+                // 虚拟卷/不提供统计的卷：本次已按“已执行”记录，历史里也要标出“无碎片百分比属正常”，
+                // 否则同一份 drive_status.json 会自相矛盾（状态=已执行，但 FragStatsUnavailable=false）。
+                if (result.Status == DefragOutcomeClassifier.ExecutedWithoutFragStats)
+                    entry.FragStatsUnavailable = true;
             }
 
             file.Save();

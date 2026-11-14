@@ -57,6 +57,9 @@ public sealed class DriveStatusEntry
     public double? FragPercent { get; set; }
     public bool Probed { get; set; }
 
+    /// <summary>探测成功，但该卷（如 VHD/VHDX）不提供碎片百分比统计；FragPercent 为空属正常。</summary>
+    public bool FragStatsUnavailable { get; set; }
+
     /// <summary>最近一次真实整理结束时间（yyyy-MM-dd HH:mm:ss）；没有执行过时为空。</summary>
     public string LastRunAt { get; set; } = string.Empty;
 

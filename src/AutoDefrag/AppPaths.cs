@@ -58,9 +58,9 @@ public static class AppPaths
     public static string MigrationNote { get; private set; } = string.Empty;
 
     /// <summary>
-    /// worker 专用：接受主进程通过 --datadir 传入的数据目录。
-    /// 提权时如果换成了另一个管理员账户，%LocalAppData% 会指向别人的配置；用主进程的路径可避免
-    /// 进度、状态、停止标记写到用户看不到的地方。只在 worker 模式下调用。
+    /// 接受 --datadir 传入的数据目录。
+    /// worker 模式下由主进程传入，避免提权到另一个管理员账户后 %LocalAppData% 指向别人的配置；
+    /// 主界面与 dry-run 也支持该参数，用于测试隔离（不影响正常的 %LocalAppData% 路径）。
     /// </summary>
     public static bool ApplyRootOverride(string[] args)
     {

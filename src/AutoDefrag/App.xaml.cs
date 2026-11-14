@@ -24,11 +24,13 @@ public partial class App : System.Windows.Application
     private MainViewModel? _vm;
     private bool _exiting;
     private bool _trayHintShown;
+    private string _instanceName = "AutoDefrag";
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        _instanceName = GetInstanceName(e.Args);
 
         DispatcherUnhandledException += (_, args) =>
         {
@@ -53,6 +55,8 @@ public partial class App : System.Windows.Application
             return;
         }
 
+        // --datadir 用于测试隔离/便携运行；正常启动不传该参数时仍使用 %LocalAppData%\AutoDefrag。
+        AppPaths.ApplyRootOverride(e.Args);
         AppPaths.Ensure();
         Logger.Init("app");
         ToolTipGuard.Initialize();
@@ -64,7 +68,7 @@ public partial class App : System.Windows.Application
         var silent = e.Args.Any(a => string.Equals(a, "--tray", StringComparison.OrdinalIgnoreCase));
         WriteStartupBanner(silent);
 
-        _mutex = new Mutex(true, @"Local\AutoDefrag.SingleInstance", out var createdNew);
+        _mutex = new Mutex(true, @"Local\" + _instanceName + ".SingleInstance", out var createdNew);
         if (!createdNew)
         {
             Logger.Info(silent
@@ -84,13 +88,26 @@ public partial class App : System.Windows.Application
             else Logger.Info(note);
         }
 
+        // 配置损坏时进入安全模式：不得自动整理、不得改写开机自启、不默认勾选任何磁盘。
+        // 否则“解析失败 → 回退默认值”会立刻对全部真实磁盘发起一次自动整理，风险不可接受。
+        var safeMode = _store.LastLoadWasCorrupt;
+        if (safeMode)
+        {
+            config.ScheduleEnabled = false;
+            config.AutoStart = false;
+            config.SelectedDrives = new List<string>();
+            _store.Save(config);
+            Logger.Warn("配置损坏，已进入安全模式：本次不自动整理、不勾选任何磁盘、不改动开机自启；请检查设置后重新保存");
+        }
+
         Logger.Info(
             $"配置已载入: {AppPaths.ConfigFile} " +
             $"(DailyTime={config.DailyTime}, AutoStart={config.AutoStart}, " +
             $"CpuThreshold={config.CpuThreshold}, ScheduleEnabled={config.ScheduleEnabled}, " +
             $"SelectedDrives={(config.SelectedDrives is null ? "(首次运行: 默认全部)" : string.Join(",", config.SelectedDrives))})");
 
-        AutoStartService.Sync(config.AutoStart);
+        // 安全模式下配置已经不安全，同步 Run 键会改到用户的开机自启，必须跳过。
+        if (!safeMode) AutoStartService.Sync(config.AutoStart);
         // 界面外观固定：圆润系统字体 + 跟随 Windows 应用主题（浅色/深色两套都已实现）。
         // 旧配置里的 UiFont / Theme 字段保留兼容，但不再读取，统一按默认处理。
         ThemeService.Apply("System");
@@ -163,7 +180,7 @@ public partial class App : System.Windows.Application
         {
             try
             {
-                using var handle = EventWaitHandle.OpenExisting(@"Local\AutoDefrag.ShowWindow");
+                using var handle = EventWaitHandle.OpenExisting(@"Local\" + _instanceName + ".ShowWindow");
                 handle.Set();
                 Logger.Info("已请求已有实例显示主窗口，本次启动退出");
                 return;
@@ -185,7 +202,7 @@ public partial class App : System.Windows.Application
 
     private void StartShowWindowListener()
     {
-        _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\AutoDefrag.ShowWindow");
+        _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\" + _instanceName + ".ShowWindow");
         var thread = new Thread(() =>
         {
             while (true)
@@ -206,6 +223,29 @@ public partial class App : System.Windows.Application
             Name = "show-window-listener"
         };
         thread.Start();
+    }
+
+    // ------------------------------------------------------------------ 测试隔离
+
+    /// <summary>
+    /// --instance &lt;name&gt;：为测试/多开使用独立的单实例互斥体与唤起事件，避免与正在运行的正式实例互相干扰。
+    /// 只接受短字母数字名；非法值回落到默认实例名。
+    /// </summary>
+    private static string GetInstanceName(string[] args)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (!string.Equals(args[i], "--instance", StringComparison.OrdinalIgnoreCase)) continue;
+
+            var value = (args[i + 1] ?? string.Empty).Trim();
+            if (value.Length is > 0 and <= 40 &&
+                value.All(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.'))
+            {
+                return value;
+            }
+        }
+
+        return "AutoDefrag";
     }
 
     // ------------------------------------------------------------------ 托盘

@@ -111,11 +111,28 @@ internal static class Native
     // ---------------------------------------------------------------- 介质检测
 
     private const uint IoctlStorageQueryProperty = 0x002D1400;
+    private const uint IoctlVolumeGetVolumeDiskExtents = 0x00560000;
     private const int StorageDeviceSeekPenaltyProperty = 7;
+    private const int StorageDeviceProperty = 0;
     private const uint PropertyStandardQuery = 0;
     private const uint FileShareRead = 0x00000001;
     private const uint FileShareWrite = 0x00000002;
     private const uint OpenExisting = 3;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DiskExtent
+    {
+        public uint DiskNumber;
+        public long StartingOffset;
+        public long ExtentLength;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct VolumeDiskExtentsHeader
+    {
+        public uint NumberOfDiskExtents;
+        public DiskExtent FirstExtent;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct StoragePropertyQuery
@@ -156,6 +173,28 @@ internal static class Native
         out uint lpBytesReturned,
         IntPtr lpOverlapped);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeviceIoControl(
+        IntPtr hDevice,
+        uint dwIoControlCode,
+        ref StoragePropertyQuery lpInBuffer,
+        uint nInBufferSize,
+        IntPtr lpOutBuffer,
+        uint nOutBufferSize,
+        out uint lpBytesReturned,
+        IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeviceIoControl(
+        IntPtr hDevice,
+        uint dwIoControlCode,
+        IntPtr lpInBuffer,
+        uint nInBufferSize,
+        IntPtr lpOutBuffer,
+        uint nOutBufferSize,
+        out uint lpBytesReturned,
+        IntPtr lpOverlapped);
+
     /// <summary>
     /// 查询卷所在介质是否有“寻道惩罚”：机械硬盘为 true，SSD / 闪存为 false。
     /// 无法查询（权限、虚拟磁盘、驱动不支持）时返回 null，调用方按 SSD 保守处理。
@@ -192,6 +231,91 @@ internal static class Native
         }
         finally
         {
+            CloseHandle(handle);
+        }
+    }
+
+    /// <summary>
+    /// 卷是否位于虚拟/非物理盘：VHD/VHDX 的 file-backed virtual、虚拟总线或 Storage Spaces。
+    /// 返回 null 表示无法识别（权限、驱动不支持、动态卷等）；调用方必须按“未知”处理，
+    /// 不能用 null 去判定失败。
+    /// </summary>
+    public static bool? TryIsVirtualVolume(string driveLetter)
+    {
+        var devicePath = @"\\.\" + driveLetter.TrimEnd('\\');
+        var volume = CreateFileW(devicePath, 0, FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting, 0, IntPtr.Zero);
+        if (volume == IntPtr.Zero) return null;
+
+        const int bufferSize = 4096;
+        var buffer = Marshal.AllocHGlobal(bufferSize);
+        try
+        {
+            if (!DeviceIoControl(volume, IoctlVolumeGetVolumeDiskExtents, IntPtr.Zero, 0,
+                    buffer, (uint)bufferSize, out var returned, IntPtr.Zero))
+            {
+                return null;
+            }
+
+            if (returned < sizeof(uint)) return null;
+
+            var count = Marshal.ReadInt32(buffer);
+            if (count <= 0 || count > 64) return null;
+
+            var extentSize = Marshal.SizeOf<DiskExtent>();
+            var extentsOffset = Marshal.OffsetOf<VolumeDiskExtentsHeader>(
+                nameof(VolumeDiskExtentsHeader.FirstExtent)).ToInt32();
+            if (returned < extentsOffset + count * extentSize) return null;
+
+            var anyVirtual = false;
+            for (var i = 0; i < count; i++)
+            {
+                var diskNumber = (uint)Marshal.ReadInt32(buffer, extentsOffset + i * extentSize);
+                var busType = TryGetPhysicalDiskBusType(diskNumber);
+                if (busType is null) return null;
+
+                // BusTypeVirtual=0x0E / BusTypeFileBackedVirtual=0x0F / BusTypeSpaces=0x10
+                if (busType is 0x0E or 0x0F or 0x10) anyVirtual = true;
+            }
+
+            return anyVirtual;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+            CloseHandle(volume);
+        }
+    }
+
+    private static int? TryGetPhysicalDiskBusType(uint diskNumber)
+    {
+        var devicePath = @"\\.\PhysicalDrive" + diskNumber;
+        var handle = CreateFileW(devicePath, 0, FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting, 0, IntPtr.Zero);
+        if (handle == IntPtr.Zero) return null;
+
+        const int bufferSize = 1024;
+        var buffer = Marshal.AllocHGlobal(bufferSize);
+        try
+        {
+            var query = new StoragePropertyQuery
+            {
+                PropertyId = StorageDeviceProperty,
+                QueryType = PropertyStandardQuery,
+                AdditionalParameters = 0
+            };
+
+            if (!DeviceIoControl(handle, IoctlStorageQueryProperty, ref query,
+                    (uint)Marshal.SizeOf<StoragePropertyQuery>(), buffer, (uint)bufferSize, out var returned, IntPtr.Zero))
+            {
+                return null;
+            }
+
+            // STORAGE_DEVICE_DESCRIPTOR：Version(0) Size(4) DeviceType(8) ... BusType(28)
+            if (returned < 32) return null;
+            return Marshal.ReadInt32(buffer, 28);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
             CloseHandle(handle);
         }
     }

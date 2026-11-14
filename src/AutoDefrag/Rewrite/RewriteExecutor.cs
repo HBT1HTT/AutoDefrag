@@ -144,7 +144,8 @@ public static class RewriteExecutor
                 Cleanup(tempPath, backupPath);
                 return Skip(path,
                     $"新位置区段数没有减少（{beforeLayout.ExtentCount} -> {tempLayout.ExtentCount}），放弃重写",
-                    started, fileInfo.Length, NtfsNative.ExtentsText(beforeExtents), beforeLayout.ExtentCount);
+                    started, fileInfo.Length, NtfsNative.ExtentsText(beforeExtents), beforeLayout.ExtentCount,
+                    NtfsNative.ExtentsText(tempExtents), tempLayout.ExtentCount);
             }
 
             // -------------------------------------------------- 5. 还原元数据
@@ -559,7 +560,8 @@ public static class RewriteExecutor
     }
 
     private static RewriteFileResult Skip(
-        string path, string reason, DateTime started, long size, string extents, int extentCount) =>
+        string path, string reason, DateTime started, long size, string extents, int extentCount,
+        string afterExtents = "", int afterExtentCount = 0) =>
         new()
         {
             Path = path,
@@ -568,6 +570,8 @@ public static class RewriteExecutor
             SizeBytes = size,
             BeforeExtents = extents,
             BeforeExtentCount = extentCount,
+            AfterExtents = afterExtents,
+            AfterExtentCount = afterExtentCount,
             ElapsedSeconds = (DateTime.UtcNow - started).TotalSeconds
         };
 

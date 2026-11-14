@@ -164,7 +164,13 @@ public static class RewriteReport
             sb.AppendLine($"    大小={DiskService.FormatBytes(r.SizeBytes)}  结果={r.Status}" +
                           (string.IsNullOrEmpty(r.Reason) ? string.Empty : $"  原因={r.Reason}"));
             sb.AppendLine($"    before: 区段={r.BeforeExtentCount}  [{r.BeforeExtents}]");
-            sb.AppendLine($"    after : 区段={r.AfterExtentCount}  [{r.AfterExtents}]");
+            // 只有真正尝试过新位置（成功或回滚）时才打印 after；跳过时若有试算结果也如实标为“新位置”，
+            // 避免出现 after: 区段=0 [] 这种会让人误以为数据丢失的误导输出。
+            if (!string.IsNullOrEmpty(r.AfterExtents) || r.AfterExtentCount > 0)
+            {
+                var label = r.Status == "跳过" ? "新位置" : "after ";
+                sb.AppendLine($"    {label}: 区段={r.AfterExtentCount}  [{r.AfterExtents}]");
+            }
             if (r.Status == "成功")
             {
                 sb.AppendLine($"    可回收碎片 = {r.BeforeFragmentedClusters - r.AfterFragmentedClusters} 簇" +
